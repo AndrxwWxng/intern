@@ -1100,7 +1100,7 @@ export async function ask(question: string, ownerId: string): Promise<void> {
   }
 
   // Same interleaving as a live intern run — one lane per run, not one buffer.
-  const out = scout.lanes((text) => log(null, "out", text));
+  const out = scout.lanes((text) => say("out", text));
 
   try {
     for await (const ev of scout.runStream(question, {
@@ -1109,7 +1109,7 @@ export async function ask(question: string, ownerId: string): Promise<void> {
       const kind = String(ev.event ?? "");
       if (kind.includes("ToolCallStarted")) {
         out.flush(ev);
-        log(null, "tool", `${ev.tool?.tool_name ?? "tool"}(…)`);
+        say("tool", `${ev.tool?.tool_name ?? "tool"}(…)`);
       } else if (typeof ev.content === "string" && ev.content) {
         const lane = out.lane(ev);
         lane.text += ev.content;

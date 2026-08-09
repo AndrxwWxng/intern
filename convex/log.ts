@@ -87,6 +87,40 @@ export const retract = mutation({
   },
 });
 
+/**
+ * Convert pre-roster-removal decision rows to action kinds.
+ *
+ * Trust used to be tracked against an intern's job title; it is now tracked
+ * against what actually went out. The old rows carry `role` ("correspondent")
+ * which names nothing sendable, so the kind is read from the action the
+ * decision was about — that is the only place the truth exists.
+ *
+ * Safe to run repeatedly; rows that already have a kind are left alone.
+ */
+export const backfillDecisionKinds = mutation({
+  args: {},
+  handler: async (ctx) => {
+    let converted = 0;
+    let orphaned = 0;
+    for (const row of await ctx.db.query("decisions").take(2000)) {
+      if (row.kind) continue;
+      const action = await ctx.db
+        .query("actions")
+        .withIndex("by_handle", (q) => q.eq("handle", row.actionId))
+        .unique();
+      if (!action) {
+        // The action is gone, so what it was can no longer be established.
+        // Dropping the row loses one data point; guessing corrupts the record.
+        orphaned++;
+        continue;
+      }
+      await ctx.db.patch("decisions", row._id, { kind: action.kind, role: undefined });
+      converted++;
+    }
+    return { converted, orphaned };
+  },
+});
+
 export const appendDecision = mutation({
   args: {
     actionId: v.string(),
@@ -140,7 +174,9 @@ export const replay = query({
         .sort((a, b) => a.at - b.at)
         .map((d) => ({
           actionId: d.actionId,
-          kind: d.kind,
+          // Unattributable legacy rows read as "", which matches no action kind,
+          // so trust ignores them rather than crediting the wrong surface.
+          kind: d.kind ?? "",
           outcome: d.outcome,
           at: d.at,
         })),
