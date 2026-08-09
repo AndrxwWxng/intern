@@ -266,6 +266,17 @@ export default function BrainGraph({
     const GRAVITY = 0.011;
     const DAMP = 0.84;
 
+    /**
+     * People sit on the rim, not in the pile.
+     *
+     * Everything else falls toward the centre; these fall toward a ring
+     * instead. It reads as an org standing around its work rather than being
+     * tangled in it, and it keeps the middle for what is actually moving —
+     * facts, projects and whatever an intern is touching right now.
+     */
+    const RIM: ReadonlySet<string> = new Set(["contact"]);
+    const RIM_PULL = 1.7;
+
     const step = () => {
       const bs = [...bodies.current.values()];
       if (!bs.length) return;
@@ -313,14 +324,25 @@ export default function BrainGraph({
         q.vy -= fy;
       }
 
+      // Scales with the graph so the rim stays clear of the middle as the
+      // brain grows, rather than being a radius that only suits one size.
+      const rim = 150 + Math.sqrt(bs.length) * 26;
+
       for (const b of bs) {
         if (b.fixed) {
           b.vx = 0;
           b.vy = 0;
           continue;
         }
-        b.vx -= b.x * GRAVITY * a;
-        b.vy -= b.y * GRAVITY * a;
+        if (RIM.has(b.node.kind)) {
+          const d = Math.hypot(b.x, b.y) || 0.001;
+          const pull = (d - rim) * GRAVITY * RIM_PULL * a;
+          b.vx -= (b.x / d) * pull;
+          b.vy -= (b.y / d) * pull;
+        } else {
+          b.vx -= b.x * GRAVITY * a;
+          b.vy -= b.y * GRAVITY * a;
+        }
         b.vx *= DAMP;
         b.vy *= DAMP;
         b.x += Math.max(-14, Math.min(14, b.vx));
