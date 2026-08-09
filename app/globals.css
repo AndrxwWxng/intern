@@ -24,6 +24,8 @@
   --color-k-tag: #565c65;
   --color-k-intern: #f2f4f6;
   --color-k-action: #e8788a;
+  --color-k-fact: #e3c877;
+  --color-k-question: #ff8ad8;
 
   --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo,
     monospace;

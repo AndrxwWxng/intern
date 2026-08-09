@@ -9,7 +9,7 @@
  * fake of a live result.
  */
 
-import type { Artifact, Graph, GraphEdge, GraphNode } from "./types";
+import type { Artifact, Graph, GraphEdge, GraphNode, RoleId } from "./types";
 
 // ---------------------------------------------------------------------------
 // Seed brain
@@ -309,6 +309,61 @@ export function planSim(task: string, internId: string): SimStep[] {
 
 export function simSummary(task: string): string {
   return `Filed ${slug(task)} into the knowledge wiki and linked it to the CRM. Re-run to refresh from live sources.`;
+}
+
+// ---------------------------------------------------------------------------
+// Questions
+//
+// The simulated intern has to be able to get stuck, or the approval gate is
+// the only handover anyone ever sees and half the design goes undemonstrated.
+// It gets stuck on the same thing a real one would: something specific to this
+// company that the brief did not say and the brain does not hold.
+// ---------------------------------------------------------------------------
+
+/** Words that name a person or a slot the brain would have to fill in. */
+const AMBIGUOUS: [RegExp, (m: string) => { question: string; context: string }][] = [
+  [
+    /\bonboard(?:ing)?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/,
+    (name) => ({
+      question: `Who does ${name} report to, and which team are they joining?`,
+      context: `Onboarding ${name}. The CRM has no contact for them and no reporting line, and the first-week page needs both before it can say which channels and which manager 1:1 to set up.`,
+    }),
+  ],
+  [
+    /\b(?:set up|provision|grant)\b.*\baccess\b/,
+    () => ({
+      question: "Which systems should this access cover — the standard set, or something narrower?",
+      context:
+        "The brief says to grant access but not to what. wiki/knowledge has no page on a standard access bundle, so there is nothing to copy.",
+    }),
+  ],
+  [
+    /\b(?:schedule|book|invite)\b/,
+    () => ({
+      question: "What time should this be, and how long?",
+      context:
+        "Nothing in the brief or the calendar context gives a time. A guessed slot would send real invitations to real people.",
+    }),
+  ],
+];
+
+/**
+ * Decide whether a simulated brief has a hole in it worth stopping for.
+ *
+ * Only the onboarder stops in SIM. Every role asking would be noise, and
+ * onboarding is the case the design keeps using because it is the one where a
+ * confident guess does the most damage.
+ */
+export function simQuestion(
+  task: string,
+  role: RoleId,
+): { question: string; context: string } | null {
+  if (role !== "onboarder") return null;
+  for (const [pattern, build] of AMBIGUOUS) {
+    const match = task.match(pattern);
+    if (match) return build(match[1] ?? "them");
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------

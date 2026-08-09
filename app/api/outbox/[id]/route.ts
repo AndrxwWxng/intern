@@ -1,36 +1,78 @@
-import { approveAction, rejectAction } from "@/lib/store";
+import { approveAndSend, rejectAction } from "@/lib/store";
+import type { Draft } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
+/** Only the fields a person can rewrite before approving. */
+function edits(raw: unknown): Partial<Draft> | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const input = raw as Record<string, unknown>;
+  const out: Partial<Draft> = {};
+  const list = (v: unknown) =>
+    Array.isArray(v)
+      ? v.map(String)
+      : typeof v === "string"
+        ? v.split(",").map((s) => s.trim()).filter(Boolean)
+        : undefined;
+
+  const to = list(input.to);
+  if (to) out.to = to;
+  const cc = list(input.cc);
+  if (cc) out.cc = cc;
+  for (const field of ["subject", "body", "startsAt", "endsAt"] as const) {
+    if (typeof input[field] === "string") out[field] = input[field] as string;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
 /**
- * Approving here marks the draft ready — it does not send. Whoever holds the
- * credentials (VoiceOS) picks it up and reports back via MCP.
+ * Approving sends it, when a connector for that surface is configured. If none
+ * is, the draft stays `approved` and waits for an external sender to pick it up
+ * over MCP.
+ *
+ * `edits` is what the person changed before saying yes. It never overwrites the
+ * proposal — both halves are kept, because the difference between them is the
+ * only thing that teaches the next intern anything.
  */
 export async function POST(
   request: Request,
   ctx: RouteContext<"/api/outbox/[id]">,
 ) {
   const { id } = await ctx.params;
-  let body: { decision?: string; reason?: string };
+  let body: { decision?: string; reason?: string; edits?: unknown };
   try {
-    body = (await request.json()) as { decision?: string; reason?: string };
+    body = (await request.json()) as {
+      decision?: string;
+      reason?: string;
+      edits?: unknown;
+    };
   } catch {
     return Response.json({ error: "invalid json body" }, { status: 400 });
   }
 
-  const action =
-    body.decision === "approve"
-      ? approveAction(id, "cockpit")
-      : body.decision === "reject"
-        ? rejectAction(id, body.reason ?? "rejected in the cockpit", "cockpit")
-        : null;
-
-  if (!action) {
-    return Response.json(
-      { error: `cannot ${body.decision ?? "decide"} ${id}` },
-      { status: 400 },
+  if (body.decision === "approve") {
+    const { action, dispatched } = await approveAndSend(
+      id,
+      "cockpit",
+      edits(body.edits),
     );
+    if (!action) {
+      return Response.json({ error: `no pending action ${id}` }, { status: 400 });
+    }
+    return Response.json({ action, dispatched });
   }
-  return Response.json({ action });
+
+  if (body.decision === "reject") {
+    const action = rejectAction(
+      id,
+      body.reason ?? "rejected in the cockpit",
+      "cockpit",
+    );
+    return action
+      ? Response.json({ action, dispatched: false })
+      : Response.json({ error: `no open action ${id}` }, { status: 400 });
+  }
+
+  return Response.json({ error: "decision must be approve or reject" }, { status: 400 });
 }
