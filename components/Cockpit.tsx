@@ -1,6 +1,8 @@
 "use client";
 
+import { useQuery } from "convex/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { api } from "@/convex/_generated/api";
 import BrainGraph from "./BrainGraph";
 import BrainRail from "./BrainRail";
 import CommandBar, { HELP } from "./CommandBar";
@@ -44,14 +46,16 @@ const EMPTY_SYSTEM: SystemState = {
 export default function Cockpit() {
   const [interns, setInterns] = useState<Intern[]>([]);
   const [log, setLog] = useState<LogLine[]>([]);
-  const [graph, setGraph] = useState<Graph>(EMPTY_GRAPH);
+  const [streamGraph, setStreamGraph] = useState<Graph>(EMPTY_GRAPH);
   const [system, setSystem] = useState<SystemState>(EMPTY_SYSTEM);
-  const [outbox, setOutbox] = useState<ProposedAction[]>([]);
+  const [streamOutbox, setStreamOutbox] = useState<ProposedAction[]>([]);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [trust, setTrust] = useState<TrustRecord[]>([]);
   const [brain, setBrain] = useState<BrainStats | null>(null);
   const [connectors, setConnectors] = useState<ConnectorsState | null>(null);
   const [connected, setConnected] = useState(false);
+  const convexGraph = useQuery(api.brain.graph, {});
+  const convexOutbox = useQuery(api.outbox.list, {});
 
   const [filter, setFilter] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -91,7 +95,7 @@ export default function Cockpit() {
           setInterns(e.interns);
           setLog(e.log);
           setSystem(e.system);
-          setOutbox(e.outbox);
+          setStreamOutbox(e.outbox);
           setQuestions(e.questions);
           setTrust(e.trust);
           setBrain(e.brain);
@@ -110,7 +114,7 @@ export default function Cockpit() {
           setBrain(e.brain);
           break;
         case "action":
-          setOutbox((prev) => {
+          setStreamOutbox((prev) => {
             const rest = prev.filter((a) => a.id !== e.action.id);
             return [e.action, ...rest].sort((a, b) => b.createdAt - a.createdAt);
           });
@@ -128,7 +132,7 @@ export default function Cockpit() {
           });
           break;
         case "graph":
-          setGraph(e.graph);
+          setStreamGraph(e.graph);
           break;
         case "system":
           setSystem(e.system);
@@ -148,6 +152,64 @@ export default function Cockpit() {
       alive = false;
     };
   }, []);
+
+  const graph = useMemo<Graph>(() => {
+    if (!convexGraph?.nodes.length) return streamGraph;
+
+    const nodes = new Map(streamGraph.nodes.map((n) => [n.id, n]));
+    for (const n of convexGraph.nodes) {
+      nodes.set(n.id, {
+        id: n.id,
+        label: n.label,
+        kind: n.kind,
+        weight: n.weight ?? undefined,
+        detail: n.detail ?? undefined,
+        meta: n.meta ?? undefined,
+      });
+    }
+
+    const seen = new Set(
+      streamGraph.edges.map((e) => `${e.source}|${e.target}|${e.rel ?? ""}`),
+    );
+    const edges = [...streamGraph.edges];
+    for (const e of convexGraph.edges) {
+      const key = `${e.source}|${e.target}|${e.rel ?? ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      edges.push({ source: e.source, target: e.target, rel: e.rel ?? undefined });
+    }
+
+    return {
+      ...streamGraph,
+      nodes: [...nodes.values()],
+      edges,
+      generatedAt: Math.max(streamGraph.generatedAt, convexGraph.generatedAt),
+    };
+  }, [streamGraph, convexGraph]);
+
+  const outbox = useMemo<ProposedAction[]>(() => {
+    if (!convexOutbox?.length) return streamOutbox;
+
+    const byId = new Map(streamOutbox.map((a) => [a.id, a]));
+    for (const row of convexOutbox) {
+      byId.set(row.handle, {
+        id: row.handle,
+        internId: row.internHandle,
+        kind: row.kind,
+        status: row.status,
+        title: row.title,
+        draft: row.draft,
+        rationale: row.rationale,
+        sources: row.sources,
+        createdAt: row.createdAt,
+        decidedAt: row.decidedAt,
+        settledAt: row.settledAt,
+        decidedVia: row.decidedVia,
+        result: row.result,
+      });
+    }
+    return [...byId.values()].sort((a, b) => b.createdAt - a.createdAt);
+  }, [streamOutbox, convexOutbox]);
 
   // Derived, not stored — the brain mutates under the inspector constantly.
   const selected = useMemo(
@@ -258,7 +320,7 @@ export default function Cockpit() {
     try {
       const res = await fetch("/api/brain?refresh=1");
       const data = (await res.json()) as { graph: Graph };
-      setGraph(data.graph);
+      setStreamGraph(data.graph);
       echo(
         "ok",
         `brain: ${data.graph.nodes.length} nodes, ${data.graph.edges.length} edges (${data.graph.mode})`,
