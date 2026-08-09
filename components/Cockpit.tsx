@@ -1,5 +1,6 @@
 "use client";
 
+import { useAuthActions } from "@convex-dev/auth/react";
 import { useQuery } from "convex/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/convex/_generated/api";
@@ -632,6 +633,7 @@ function Header({
     return () => clearInterval(t);
   }, []);
 
+  const { signOut } = useAuthActions();
   const done = interns.filter((i) => i.status === "done").length;
 
   return (
@@ -665,6 +667,14 @@ function Header({
           {system.reachable ? "LIVE" : "SIM"}
         </span>
         <span className="tabular-nums">{clock}</span>
+        <button
+          type="button"
+          onClick={() => void signOut()}
+          className="text-faint transition-colors hover:text-fg"
+          title="sign out"
+        >
+          ⏻
+        </button>
       </div>
     </header>
   );

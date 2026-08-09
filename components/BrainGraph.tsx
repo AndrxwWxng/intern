@@ -58,7 +58,7 @@ const RIM_INSET = 30;
 function pinToBorder(x: number, y: number, w: number, h: number) {
   const cx = w / 2;
   const cy = h / 2;
-  let dx = x - cx;
+  const dx = x - cx;
   let dy = y - cy;
   if (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001) dy = -1;
 
