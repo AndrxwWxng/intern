@@ -499,6 +499,8 @@ blocked.`;
 
 async function runLive(intern: Intern, signal: AbortSignal) {
   let buffer = "";
+  /** Everything the agent said, kept whole — the buffer is drained by logging. */
+  let said = "";
   const flush = () => {
     const text = buffer.trim();
     buffer = "";
@@ -552,18 +554,32 @@ async function runLive(intern: Intern, signal: AbortSignal) {
       continue;
     }
 
+    // Completion is checked before the generic content branch on purpose.
+    // RunCompleted carries the final answer in `ev.content`, so when the
+    // content branch came first it swallowed the event and `continue`d — the
+    // run finished with every tool call logged and no summary at all, which
+    // meant nothing was ever parsed out of it and nothing reached the brain.
+    if (kind.includes("RunCompleted") || kind === "run_completed") {
+      const content = typeof ev.content === "string" ? ev.content : "";
+      if (content) {
+        buffer += content;
+        said += content;
+      }
+      flush();
+      // Fall back to everything streamed: some runs deliver the answer as
+      // deltas and complete with an empty payload.
+      const final = (content || said).trim();
+      if (final) intern.summary = final.slice(0, 600);
+      continue;
+    }
+
     if (typeof ev.content === "string" && ev.content) {
       buffer += ev.content;
+      said += ev.content;
       // Flush on sentence-ish boundaries so the terminal reads like a stream
       // of thoughts rather than one wall of text at the end.
       if (buffer.length > 160 || /[.\n]$/.test(buffer)) flush();
       continue;
-    }
-
-    if (kind.includes("RunCompleted") || kind === "run_completed") {
-      flush();
-      const content = typeof ev.content === "string" ? ev.content : undefined;
-      if (content) intern.summary = content.slice(0, 600);
     }
 
     if (kind.includes("RunError") || kind.includes("Error")) {
