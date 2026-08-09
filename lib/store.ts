@@ -41,6 +41,7 @@ import {
   execute,
 } from "./connectors";
 import * as brain from "./brain";
+import { notifyQuestion } from "./notify";
 import { DEFAULT_ROLE, getRole, pickRole } from "./roster";
 import * as trust from "./trust";
 
@@ -855,6 +856,28 @@ export function askQuestion(
     ],
     [{ source: intern.id, target: id, rel: "asks" }],
   );
+
+  // Go and find the person. Parked used to mean "stalled until somebody
+  // happened to open the cockpit"; this is what makes it mean "waiting on a
+  // reply". Deliberately not awaited — the intern has already stopped, and how
+  // long Slack takes is not the parked work's problem.
+  void notifyQuestion({
+    userId: intern.ownerId,
+    questionId: id,
+    internId: intern.id,
+    role: intern.role,
+    question: row.question,
+    context: row.context,
+  }).then((result) => {
+    log(
+      intern.id,
+      result.delivered ? "ok" : "warn",
+      result.delivered
+        ? `asked on slack · ${result.detail} — reply in the thread`
+        : `no slack DM (${result.detail}) · answer it in the cockpit`,
+    );
+  });
+
   return row;
 }
 
@@ -1007,6 +1030,16 @@ export async function capture(input: {
   url?: string;
   tags?: string[];
   kind?: Fact["kind"];
+  /** What it is about — for a preference, the role it binds to. */
+  subject?: string;
+  /** Graph node ids to attach it to, so it lands wired in rather than loose. */
+  links?: string[];
+  /**
+   * A person typed this, rather than a client forwarding something it read.
+   * Worth more than an overheard claim, so it starts at the confidence an
+   * answered question gets — see `brain.learn`.
+   */
+  stated?: boolean;
   /** Also put an archivist on writing it into the wiki properly. */
   file?: boolean;
   /**
@@ -1018,7 +1051,12 @@ export async function capture(input: {
 }): Promise<{ fact: Fact; fresh: boolean; merged: boolean; intern: Intern | null }> {
   await brain.ready();
 
-  const hint = { kind: input.kind ?? ("note" as const), tags: input.tags };
+  const hint = {
+    kind: input.kind ?? ("note" as const),
+    tags: input.tags,
+    subject: input.subject,
+    links: input.links?.length ? input.links : undefined,
+  };
   const { observation, fresh } = brain.record({
     sourceId: input.sourceId ?? "capture",
     externalId: input.externalId,
@@ -1029,6 +1067,7 @@ export async function capture(input: {
     hint,
   });
   const { fact, merged } = brain.promote(observation, hint);
+  if (input.stated) fact.confidence = Math.max(fact.confidence, 0.9);
 
   log(
     null,

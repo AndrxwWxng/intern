@@ -75,7 +75,13 @@ export type Observation = {
    * What extraction made of it. Carried on the observation so replaying the
    * log rebuilds the same facts instead of a pile of untyped notes.
    */
-  hint?: { kind: FactKind; tags?: string[]; subject?: string };
+  hint?: {
+    kind: FactKind;
+    tags?: string[];
+    subject?: string;
+    /** Graph node ids the fact should hang off. See `Fact.links`. */
+    links?: string[];
+  };
 };
 
 export type FactKind =
@@ -107,6 +113,14 @@ export type Fact = {
   observations: string[];
   /** Who or what it is about. For a preference, the role it binds to. */
   subject?: string;
+  /**
+   * Graph node ids this fact was deliberately attached to — the project it is
+   * about, the person who said it. Set when a human files it against something
+   * they had selected, which is the only time anyone knows the connection for
+   * certain; extraction guesses, so it leaves this empty and lets tags do the
+   * joining instead.
+   */
+  links?: string[];
   /** Union of its observations' sources, e.g. `slack:C0192`, `company:public`. */
   scopes: string[];
 };

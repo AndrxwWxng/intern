@@ -64,6 +64,18 @@ export default defineSchema({
     userId: v.id("users"),
     provider,
     refreshToken: v.string(),
+    /**
+     * The provider's own id for this person — Slack's `U…`. Needed to address
+     * them there, not just to act as them: an intern with a question has to
+     * open a DM *to* somebody.
+     */
+    providerUserId: v.optional(v.string()),
+    /**
+     * A workspace-level bot token, where the provider issues one. Slack only
+     * delivers events to a bot, so the reply half of the loop cannot use the
+     * user grant no matter how well scoped it is.
+     */
+    botToken: v.optional(v.string()),
     /** For display: which account this actually is. */
     accountLabel: v.optional(v.string()),
     scopes: v.array(v.string()),
@@ -73,7 +85,32 @@ export default defineSchema({
     brokenReason: v.optional(v.string()),
   })
     .index("by_userId", ["userId"])
-    .index("by_userId_and_provider", ["userId", "provider"]),
+    .index("by_userId_and_provider", ["userId", "provider"])
+    .index("by_provider_and_providerUserId", ["provider", "providerUserId"]),
+
+  /**
+   * One DM thread an intern started, and the question it is waiting on.
+   *
+   * The question itself lives in the Next process's memory; this is only the
+   * routing table that turns a Slack reply back into the thing it answers.
+   * Keyed by thread timestamp because that is what Slack echoes back on a
+   * threaded reply — which is what makes "answer the right one" work when a
+   * person has three interns stuck at once.
+   */
+  slackThreads: defineTable({
+    /** `ts` of the message the intern sent — the thread root. */
+    ts: v.string(),
+    channel: v.string(),
+    userId: v.id("users"),
+    /** The in-memory question handle, e.g. `ask-01ab`. */
+    questionId: v.string(),
+    internId: v.union(v.string(), v.null()),
+    askedAt: v.number(),
+    answeredAt: v.optional(v.number()),
+  })
+    .index("by_ts", ["ts"])
+    .index("by_questionId", ["questionId"])
+    .index("by_userId_and_answeredAt", ["userId", "answeredAt"]),
 
   /**
    * A pending OAuth handshake. Minted by an authenticated call, so the user is
@@ -161,6 +198,13 @@ export default defineSchema({
         ),
         tags: v.optional(v.array(v.string())),
         subject: v.optional(v.string()),
+        /**
+         * Graph node ids the person filing this pointed it at. Part of the
+         * hint rather than a table of its own because it is an input to
+         * extraction like the rest of it — replay has to see it to rebuild the
+         * same edges.
+         */
+        links: v.optional(v.array(v.string())),
       }),
     ),
   })
