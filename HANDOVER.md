@@ -1,6 +1,6 @@
 # Handover
 
-State of the build as of 9 Aug 2026, ~15:45. Written for whoever picks this up next.
+State of the build as of 9 Aug 2026, ~16:20. Written for whoever picks this up next.
 
 ---
 
@@ -72,15 +72,19 @@ a chat transcript. Rotate them after the hackathon.
 
 ## Known bugs, with locations
 
-**1. Interleaved stream output** — cosmetic but looks broken on a projector.
-Parallel sub-agent results append into one shared buffer, so two `query_*`
-outputs garble mid-sentence (`"StatusThe wiki contains: only one unknown/not
-source found"`). Fix: buffer per tool call instead of the single `said`
-accumulator in `runLive`, `lib/store.ts`.
+**1. ~~Interleaved stream output~~ — FIXED.** The cause was not "parallel
+sub-agent results": Scout streams the top-level run *and* every context
+provider's run down one HTTP response, interleaved chunk by chunk — measured at
+794 alternations across 4 concurrent runs in a single brief. `lanes()` in
+`lib/scout.ts` buffers per `run_id`, and sub-agent lines are prefixed with their
+agent (`knowledge-read · …`). It also fixed a bug nobody had noticed: all four
+runs emit `RunCompleted`, so `intern.summary` was whichever sub-agent finished
+last, not the answer. Covered by `lib/scout.test.ts`.
 
-**2. The roster is going away** — the user's call: *"the roster is bullshit get
-rid of it."* A person does many kinds of task; typing interns into
-researcher/correspondent/archivist/onboarder is fiction. **19 files.** Order matters:
+**2. ~~The roster~~ — GONE.** Trust is per action kind now. One correction to
+the old plan, for the record: step 3 did not apply. `actions` and `decisions`
+were both **empty**, so `role` dropped in a single schema push with no
+optional-then-drop dance. The original steps:
 
 1. Trust moves from role to **action kind**. `decisions.role` → `decisions.kind`
    (`slack` / `email` / `calendar`); rework `tally()` and `get()` in `lib/trust.ts`.
@@ -89,17 +93,37 @@ researcher/correspondent/archivist/onboarder is fiction. **19 files.** Order mat
 2. Then delete `lib/roster.ts`, `components/Roster.tsx`, `app/api/roster/route.ts`,
    `RoleId` from `lib/types.ts`, the charter from `BRIEF()` in `lib/store.ts`,
    and `spawn as <role>` from the command bar.
-3. ⚠️ **`actions.role` is a required column in `convex/schema.ts` with existing
-   rows.** Convex refuses a schema push while any row violates the new shape.
-   Make it optional, deploy, then drop it.
+3. ~~`actions.role` is required with existing rows.~~ There were no rows.
 
-**3. Company positioning facts are placeholders.** `fact-00i`, `fact-00k`,
-`fact-00m`, `fact-00o` describe what the company does, who it sells to, and
-what makes a prospect viable. **I invented them to unblock a demo.** Rewrite
-them to be true — an intern citing invented positioning is worse than one that
-asks. Re-capture with the same `external_id` to update in place.
+**3. ~~Company positioning facts are placeholders.~~ REWRITTEN.** They now say
+what Intern actually is, sourced from `IDEA.md` and `docs/HLD.md`. The two that
+*cannot* be true yet — the ICP and any numeric qualification bar — say **NOT YET
+DECIDED** in the body and tell the intern to ask instead of filling it in. That
+is deliberate: a fact that admits a hole beats a confident invention, and it is
+the same rule the interns are held to.
 
-**4. Slack scopes are short of the manifest.** Installed app has
+⚠️ **The instruction that used to be here was wrong and cost time.**
+"Re-capture with the same `external_id` to update in place" does not work.
+`appendObservation` is idempotent on `(sourceId, externalId)` and returns early,
+so re-capturing is a **no-op**, not an update. Use the `log:retract` mutation
+(added for exactly this), then capture the true one under the same key.
+
+**4. ~~An intern drafted to Slack and nothing was sent.~~ FIXED.** A run
+researched for three minutes, wrote a good Slack draft, and posted nothing. The
+brief carries one ```action example and it is an *email*, so the model wrote
+`{"kind":"slack","channel":"#demo","body":…}` — no `to`, no `subject`, because a
+Slack post has neither. The parser demanded both and returned `null` **silently**,
+so the run finished looking successful with an empty outbox. `lib/action-block.ts`
+now takes `channel`/`channels` as `to`, lets Slack have no subject, and — the
+part that matters — says why a block was unusable instead of dropping it.
+`lib/action-block.test.ts` pins it, using the real block from that run.
+
+**5. Failed tool calls looked like successes.** `web_search → Error: Timed out`
+was logged at `ok` level, behind a green tick. Now logged at `err`, counted on
+`intern.toolErrors`, and the finish line reads
+`finished in 182.1s · 6 tool calls failed` instead of just `finished`.
+
+**6. Slack scopes are short of the manifest.** Installed app has
 `channels:history, chat:write`. Missing `chat:write.public`, `channels:read`,
 `users:read`, `groups:*`. Effect: the bot only posts to channels it's invited
 to, can't resolve channel names to ids, can't resolve user ids to names. Fix by
@@ -152,9 +176,18 @@ now: **always branch, then PR.**
 
 ## Next, in priority order
 
-1. **Rewrite the four positioning facts** so they're true — the prospecting demo rests on them
-2. **Fix the interleaved stream** — one buffer per tool call
-3. **Kill the roster** — the 3-step order above
+1. ~~Rewrite the four positioning facts~~ · ~~fix the interleaved stream~~ ·
+   ~~kill the roster~~ — all done, see above.
+2. **Rebuild Scout** and re-run one brief. `scout/scout/contexts.py` now gives
+   the web sub-agent serial tool calls and a three-search budget, because
+   firing six searches at once pinned the OpenAI 200k TPM ceiling and the last
+   ninety seconds of a run were 429s and empty results. **This one is not
+   verified** — it needs `docker compose up -d --build scout-api` and a real run.
+3. **Watch for a schema fight.** Every `npx convex dev --once` from this branch
+   deletes `actions.by_ownerId`, `actions.by_ownerId_and_status` and
+   `interns.by_userId_and_status`. Those indexes are on the *deployed* schema
+   but not in `convex/schema.ts` here, so someone else's branch has an `ownerId`
+   this one does not. Reconcile before either of you pushes again.
 4. **VoiceOS** — nothing to build. Point it at `http://localhost:3000/api/mcp`,
    or `ngrok http 3000` if it's on another machine.
 

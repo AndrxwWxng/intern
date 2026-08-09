@@ -9,7 +9,7 @@
  * fake of a live result.
  */
 
-import type { Artifact, Graph, GraphEdge, GraphNode, RoleId } from "./types";
+import type { Artifact, Graph, GraphEdge, GraphNode } from "./types";
 
 // ---------------------------------------------------------------------------
 // Seed brain
@@ -350,15 +350,14 @@ const AMBIGUOUS: [RegExp, (m: string) => { question: string; context: string }][
 /**
  * Decide whether a simulated brief has a hole in it worth stopping for.
  *
- * Only the onboarder stops in SIM. Every role asking would be noise, and
- * onboarding is the case the design keeps using because it is the one where a
- * confident guess does the most damage.
+ * The patterns above are the gate, and they are narrow on purpose: an intern
+ * that stops on every brief is noise. They are all cases where a confident
+ * guess does real damage — a wrong reporting line, an over-broad access grant,
+ * an invented meeting slot sent to real people.
  */
 export function simQuestion(
   task: string,
-  role: RoleId,
 ): { question: string; context: string } | null {
-  if (role !== "onboarder") return null;
   for (const [pattern, build] of AMBIGUOUS) {
     const match = task.match(pattern);
     if (match) return build(match[1] ?? "them");

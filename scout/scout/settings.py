@@ -18,6 +18,10 @@ agent_db = get_postgres_db()
 MODEL_ID = "gpt-5.6-luna"
 
 
-def default_model() -> OpenAIResponses:
-    """Fresh model instance per agent — avoids shared-state footguns."""
-    return OpenAIResponses(id=MODEL_ID)
+def default_model(**overrides) -> OpenAIResponses:
+    """Fresh model instance per agent — avoids shared-state footguns.
+
+    ``overrides`` go straight to the model, for the one or two sub-agents that
+    need to behave differently from the rest (see ``_create_web_provider``).
+    """
+    return OpenAIResponses(id=MODEL_ID, **overrides)

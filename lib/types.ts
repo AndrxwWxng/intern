@@ -148,29 +148,26 @@ export type BrainStats = {
 };
 
 // ---------------------------------------------------------------------------
-// The roster — interns have job descriptions, not just briefs
+// Trust — earned per kind of action, not per kind of intern
+//
+// There used to be a roster here: researcher, correspondent, archivist,
+// onboarder. It was fiction. A person does many kinds of task, and so does an
+// intern; sorting them into job titles made the trust number mean nothing you
+// could act on ("the correspondent is right 90% of the time" — at what?).
+//
+// What a person actually decides on is an outgoing action, and those have a
+// real type: an email, a Slack post, a calendar invite. Tracking trust against
+// that gives a true and useful statement — "8 of 9 Slack posts went out
+// unedited" — and it maps exactly onto the thing graduation switches off.
 // ---------------------------------------------------------------------------
 
-export type RoleId = "researcher" | "correspondent" | "archivist" | "onboarder";
-
-export type Role = {
-  id: RoleId;
-  name: string;
-  /** One line for the roster panel. */
-  blurb: string;
-  /** Appended to the brief — this is the job description. */
-  charter: string;
-  /** Words in a brief that pull towards this role. */
-  match: string[];
-};
-
 /**
- * How often a role's work is accepted with no edits, over everything a person
- * has decided on. Crossing the threshold *proposes* graduation; a person
+ * How often work of one kind is accepted with no edits, over everything a
+ * person has decided on. Crossing the threshold *proposes* graduation; a person
  * confirms it. Graduation is never automatic.
  */
 export type TrustRecord = {
-  role: RoleId;
+  kind: ActionKind;
   decisions: number;
   unedited: number;
   edited: number;
@@ -192,7 +189,6 @@ export type Question = {
   internId: string | null;
   /** Whose intern got stuck — the question goes back to them, not the room. */
   ownerId: string | null;
-  role: RoleId;
   question: string;
   /** What the intern was doing when it got stuck. */
   context: string;
@@ -233,8 +229,6 @@ export type Intern = {
   /** Short handle shown in the UI, e.g. `int-7f2`. */
   handle: string;
   task: string;
-  /** Which job description it is working to. */
-  role: RoleId;
   status: InternStatus;
   mode: Mode;
   createdAt: number;
@@ -247,6 +241,8 @@ export type Intern = {
   /** Tools the intern has reached for, in order of first use. */
   tools: string[];
   toolCalls: number;
+  /** Tool calls that came back an error. A run can finish with these > 0. */
+  toolErrors: number;
   artifacts: Artifact[];
   summary?: string;
   error?: string;
@@ -258,6 +254,9 @@ export type Intern = {
 // ---------------------------------------------------------------------------
 
 export type ActionKind = "email" | "slack" | "calendar";
+
+/** Every surface work can go out on — and so every surface trust is earned on. */
+export const ACTION_KINDS: ActionKind[] = ["email", "slack", "calendar"];
 
 export type ActionStatus =
   | "pending"
@@ -288,8 +287,7 @@ export type ProposedAction = {
   internId: string | null;
   /** Whose intern proposed it — only they see it, only they decide it. */
   ownerId: string | null;
-  /** The job description that produced it — trust is tracked per role. */
-  role: RoleId;
+  /** What surface it goes out on. Trust is tracked against this. */
   kind: ActionKind;
   status: ActionStatus;
   /** One line, written to be spoken. */

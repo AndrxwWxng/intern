@@ -23,7 +23,7 @@ import type {
   NodeKind,
   ProposedAction,
   Question,
-  RoleId,
+  ActionKind,
   SystemState,
   TrustRecord,
 } from "@/lib/types";
@@ -282,7 +282,6 @@ export default function Cockpit() {
         // `api.outbox.list` only ever returns this viewer's rows, so anything
         // arriving here is already theirs.
         ownerId: row.ownerId ?? null,
-        role: row.role,
         kind: row.kind,
         status: row.status,
         title: row.title,
@@ -313,11 +312,11 @@ export default function Cockpit() {
 
   // --- actions ------------------------------------------------------------
   const spawn = useCallback(
-    async (task: string, role?: RoleId) => {
+    async (task: string) => {
       const res = await authFetch("/api/interns", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ task, role }),
+        body: JSON.stringify({ task }),
       });
       if (!res.ok) echo("err", `spawn failed: ${res.status}`);
     },
@@ -376,13 +375,13 @@ export default function Cockpit() {
   );
 
   const graduate = useCallback(
-    async (role: RoleId, confirmed: boolean) => {
-      const res = await authFetch("/api/roster", {
+    async (kind: ActionKind, confirmed: boolean) => {
+      const res = await authFetch("/api/trust", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ role, confirmed }),
+        body: JSON.stringify({ kind, confirmed }),
       });
-      if (!res.ok) echo("err", `could not change ${role}`);
+      if (!res.ok) echo("err", `could not change ${kind}`);
     },
     [echo, authFetch],
   );
@@ -507,13 +506,13 @@ export default function Cockpit() {
           if (!arg) return echo("err", "usage: capture <what you know>");
           void captureText(arg);
           return;
-        case "roster":
+        case "trust":
           for (const t of trust) {
             echo(
               "out",
-              `${t.role.padEnd(15)} ${
+              `${t.kind.padEnd(10)} ${
                 t.decisions
-                  ? `${Math.round(t.rate * 100)}% unedited over ${t.decisions}`
+                  ? `${t.unedited} of ${t.decisions} approved unedited`
                   : "no decisions yet"
               }${t.graduated ? " · unsupervised" : ""}${
                 t.proposed ? " · ready to graduate" : ""
@@ -523,23 +522,18 @@ export default function Cockpit() {
           return;
         case "graduate":
         case "supervise": {
-          const role = arg.trim() as RoleId;
-          if (!trust.some((t) => t.role === role)) {
+          const kind = arg.trim() as ActionKind;
+          if (!trust.some((t) => t.kind === kind)) {
             return echo(
               "err",
-              `usage: ${verb.toLowerCase()} <${trust.map((t) => t.role).join("|")}>`,
+              `usage: ${verb.toLowerCase()} <${trust.map((t) => t.kind).join("|")}>`,
             );
           }
-          void graduate(role, verb.toLowerCase() === "graduate");
+          void graduate(kind, verb.toLowerCase() === "graduate");
           return;
         }
         case "spawn": {
-          if (!arg) return echo("err", "usage: spawn [as <role>] <task>");
-          const as = arg.match(/^as\s+(\S+)\s+([\s\S]+)$/);
-          if (as && trust.some((t) => t.role === as[1])) {
-            void spawn(as[2], as[1] as RoleId);
-            return;
-          }
+          if (!arg) return echo("err", "usage: spawn <task>");
           void spawn(arg);
           return;
         }
