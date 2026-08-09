@@ -2,12 +2,28 @@ import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 
 /**
- * Interns propose. A human decides. Something else sends.
+ * Interns propose. A human decides. Someone else sends.
  *
- * There is no `send` here by design — approving returns the draft so the
- * caller (VoiceOS, with its own credentials) can send it, then reports back
- * through `recordResult`.
+ * There is no `send` here by design — approving returns what was approved, so
+ * the caller does the sending (Intern's own connector, or VoiceOS with its
+ * credentials when none is configured) and reports back via `recordResult`.
  */
+
+const ROLE = v.union(
+  v.literal("researcher"),
+  v.literal("correspondent"),
+  v.literal("archivist"),
+  v.literal("onboarder"),
+);
+
+const DRAFT = v.object({
+  to: v.array(v.string()),
+  cc: v.optional(v.array(v.string())),
+  subject: v.string(),
+  body: v.string(),
+});
+
+const VIA = v.union(v.literal("voice"), v.literal("cockpit"), v.literal("graduated"));
 
 const STATUSES = v.union(
   v.literal("pending"),
@@ -49,14 +65,10 @@ export const propose = mutation({
   args: {
     handle: v.string(),
     internHandle: v.union(v.string(), v.null()),
+    role: ROLE,
     kind: v.union(v.literal("email"), v.literal("slack"), v.literal("calendar")),
     title: v.string(),
-    draft: v.object({
-      to: v.array(v.string()),
-      cc: v.optional(v.array(v.string())),
-      subject: v.string(),
-      body: v.string(),
-    }),
+    draft: DRAFT,
     rationale: v.string(),
     sources: v.array(v.string()),
   },
@@ -88,7 +100,9 @@ export const approve = mutation({
   args: {
     handle: v.string(),
     confirmed: v.boolean(),
-    via: v.union(v.literal("voice"), v.literal("cockpit")),
+    via: VIA,
+    /** Present when the person rewrote the draft before approving it. */
+    accepted: v.optional(DRAFT),
   },
   handler: async (ctx, args) => {
     if (!args.confirmed) {
@@ -107,21 +121,36 @@ export const approve = mutation({
       return { error: `${args.handle} is already ${action.status}` };
     }
 
+    // The edit is the training signal, so record which fields moved rather
+    // than just the final text.
+    const editedFields = args.accepted
+      ? (["to", "cc", "subject", "body"] as const).filter(
+          (f) => JSON.stringify(args.accepted![f]) !== JSON.stringify(action.draft[f]),
+        )
+      : [];
+
     await ctx.db.patch("actions", action._id, {
       status: "approved",
       decidedAt: Date.now(),
       decidedVia: args.via,
+      ...(args.accepted ? { accepted: args.accepted, editedFields: [...editedFields] } : {}),
     });
 
-    // Hand the draft back so the caller can send it with its own credentials.
-    return { handle: action.handle, kind: action.kind, draft: action.draft };
+    // Hand back what was approved, not what was proposed.
+    return {
+      handle: action.handle,
+      kind: action.kind,
+      role: action.role,
+      draft: args.accepted ?? action.draft,
+      edited: editedFields.length > 0,
+    };
   },
 });
 
 export const reject = mutation({
   args: {
     handle: v.string(),
-    via: v.union(v.literal("voice"), v.literal("cockpit")),
+    via: VIA,
     /** What should have happened instead. This is the training signal. */
     note: v.optional(v.string()),
   },

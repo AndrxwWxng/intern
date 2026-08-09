@@ -41,6 +41,10 @@ export const graph = query({
     const relations = await ctx.db.query("relations").take(limit * 4);
 
     return {
+      // Derived from the data, not the clock. A query that reads Date.now()
+      // never re-runs just because time passed, so the value would go stale
+      // and it would poison the query cache besides.
+      generatedAt: facts.reduce((max, f) => Math.max(max, f.observedAt), 0),
       nodes: facts.map((f) => ({
         id: f.extId,
         label: f.label,

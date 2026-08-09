@@ -195,10 +195,13 @@ export default function Cockpit() {
       byId.set(row.handle, {
         id: row.handle,
         internId: row.internHandle,
+        role: row.role,
         kind: row.kind,
         status: row.status,
         title: row.title,
         draft: row.draft,
+        accepted: row.accepted,
+        editedFields: row.editedFields as ProposedAction["editedFields"],
         rationale: row.rationale,
         sources: row.sources,
         createdAt: row.createdAt,
