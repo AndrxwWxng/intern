@@ -31,6 +31,14 @@ const draft = v.object({
   body: v.string(),
 });
 
+/** Trust is tracked per role, so every proposal has to carry one. */
+const roleId = v.union(
+  v.literal("researcher"),
+  v.literal("correspondent"),
+  v.literal("archivist"),
+  v.literal("onboarder"),
+);
+
 export default defineSchema({
   ...authTables,
 
@@ -145,6 +153,7 @@ export default defineSchema({
   actions: defineTable({
     handle: v.string(),
     internHandle: v.union(v.string(), v.null()),
+    role: roleId,
     kind: v.union(v.literal("email"), v.literal("slack"), v.literal("calendar")),
     status: v.union(
       v.literal("pending"),
@@ -155,14 +164,26 @@ export default defineSchema({
     ),
     /** One line, written to be spoken aloud. */
     title: v.string(),
+    /** What the intern proposed. Never overwritten. */
     draft,
+    /**
+     * What the person was actually willing to send, when they changed
+     * something. Kept apart from `draft` on purpose — collapsing the two
+     * throws away the only record of what the intern got wrong, and that
+     * difference is the entire learning loop.
+     */
+    accepted: v.optional(draft),
+    /** Which fields the person rewrote before approving. */
+    editedFields: v.optional(v.array(v.string())),
     rationale: v.string(),
     /** Fact extIds and urls the draft was built from. */
     sources: v.array(v.string()),
     createdAt: v.number(),
     decidedAt: v.optional(v.number()),
     settledAt: v.optional(v.number()),
-    decidedVia: v.optional(v.union(v.literal("voice"), v.literal("cockpit"))),
+    decidedVia: v.optional(
+      v.union(v.literal("voice"), v.literal("cockpit"), v.literal("graduated")),
+    ),
     decidedBy: v.optional(v.id("users")),
     result: v.optional(v.string()),
   })
