@@ -41,8 +41,55 @@ const roleId = v.union(
   v.literal("onboarder"),
 );
 
+/** Every outbound surface a person can connect their own account to. */
+const provider = v.union(v.literal("google"), v.literal("slack"));
+
 export default defineSchema({
   ...authTables,
+
+  // -------------------------------------------------------------------------
+  // Per-user connections — whose account the work goes out as
+  // -------------------------------------------------------------------------
+
+  /**
+   * One person's grant to one provider. Interns send as the person who
+   * approved, not as a single shared service account, so `actions.decidedBy`
+   * and the From header can never disagree.
+   *
+   * Only the refresh token is stored. Access tokens are short-lived and
+   * re-minted on demand, so there is nothing here worth stealing that a
+   * revoke at the provider doesn't immediately kill.
+   */
+  connections: defineTable({
+    userId: v.id("users"),
+    provider,
+    refreshToken: v.string(),
+    /** For display: which account this actually is. */
+    accountLabel: v.optional(v.string()),
+    scopes: v.array(v.string()),
+    connectedAt: v.number(),
+    /** Set when a refresh comes back invalid_grant — revoked or expired. */
+    brokenAt: v.optional(v.number()),
+    brokenReason: v.optional(v.string()),
+  })
+    .index("by_userId", ["userId"])
+    .index("by_userId_and_provider", ["userId", "provider"]),
+
+  /**
+   * A pending OAuth handshake. Minted by an authenticated call, so the user is
+   * bound before the browser ever leaves for the provider — the callback then
+   * needs no session of its own, which is what lets it be a plain HTTP action.
+   *
+   * Single-use and short-lived: this row is the capability.
+   */
+  oauthStates: defineTable({
+    state: v.string(),
+    userId: v.id("users"),
+    provider,
+    redirectTo: v.optional(v.string()),
+    expiresAt: v.number(),
+  }).index("by_state", ["state"]),
+
 
   // -------------------------------------------------------------------------
   // The brain

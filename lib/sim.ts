@@ -378,16 +378,21 @@ const OUTBOUND_HINTS = [
 
 // People first, then their org — so "email ramp about the pilot" still greets
 // Mara rather than opening with "Hi Ramp".
+// example.com is reserved by RFC 2606 and routes nowhere. These are seeded
+// demo contacts, and with DRY_RUN off an approved draft really sends — a
+// plausible-looking address at a real company would put test mail in a
+// stranger's inbox. Set OUTBOX_TEST_RECIPIENT to route drafts to yourself.
+const FALLBACK_DOMAIN = "example.com";
 const RECIPIENTS: [string, string, string][] = [
-  ["mara", "Mara", "mara@ramp.com"],
-  ["dan", "Dan", "dan@sequoiacap.com"],
-  ["josh", "Josh", "josh@anthropic.com"],
-  ["priya", "Priya", "priya@vercel.com"],
-  ["ramp", "Mara", "mara@ramp.com"],
-  ["sequoia", "Dan", "dan@sequoiacap.com"],
-  ["investor", "Dan", "dan@sequoiacap.com"],
-  ["anthropic", "Josh", "josh@anthropic.com"],
-  ["vercel", "Priya", "priya@vercel.com"],
+  ["mara", "Mara", `mara@${FALLBACK_DOMAIN}`],
+  ["dan", "Dan", `dan@${FALLBACK_DOMAIN}`],
+  ["josh", "Josh", `josh@${FALLBACK_DOMAIN}`],
+  ["priya", "Priya", `priya@${FALLBACK_DOMAIN}`],
+  ["ramp", "Mara", `mara@${FALLBACK_DOMAIN}`],
+  ["sequoia", "Dan", `dan@${FALLBACK_DOMAIN}`],
+  ["investor", "Dan", `dan@${FALLBACK_DOMAIN}`],
+  ["anthropic", "Josh", `josh@${FALLBACK_DOMAIN}`],
+  ["vercel", "Priya", `priya@${FALLBACK_DOMAIN}`],
 ];
 
 /**
@@ -406,7 +411,10 @@ export function simOutboundDraft(task: string): {
 
   const match = RECIPIENTS.find(([k]) => lower.includes(k));
   const who = match?.[1];
-  const to = match?.[2] ?? "team@example.com";
+  // One env var to point every simulated draft at your own inbox, which is
+  // how you test a real send without mailing a seeded contact.
+  const to =
+    process.env.OUTBOX_TEST_RECIPIENT ?? match?.[2] ?? `team@${FALLBACK_DOMAIN}`;
   const topic = keywords(task).slice(0, 3).join(" ") || "the update";
   const subject = topic.replace(/\b\w/g, (c) => c.toUpperCase());
 

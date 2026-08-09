@@ -1,0 +1,91 @@
+# Slack app manifest for Intern
+#
+# Create the app from this instead of clicking through scope checkboxes:
+#   api.slack.com/apps → Create New App → From an app manifest
+#   → pick your workspace → paste this → Create
+#
+# Covers all three Slack integrations at once:
+#   1. Intern's outbox connector posting as the app   (bot: chat:write)
+#   2. Scout reading your workspace into the brain    (bot: *:history, users:read)
+#   3. Per-user connections posting as a person       (user: chat:write)
+#
+# Event subscriptions are deliberately NOT in here — see the bottom of the file.
+# Slack verifies request_url the moment you create the app, so a URL that isn't
+# live yet makes creation fail outright.
+
+display_information:
+  name: Intern
+  description: Company brain. Interns draft, you approve, it sends.
+  background_color: "#08090a"
+  long_description: |
+    Intern keeps a graph of what the company knows and puts long-running
+    subagents to work filling the gaps. Anything outbound is drafted, never
+    sent — a person approves it first, out loud or in the cockpit.
+
+    In Slack it does two things: reads channel history so the brain knows
+    what the team has already worked out, and posts messages that a human
+    has approved.
+
+features:
+  bot_user:
+    display_name: intern
+    always_online: false
+
+oauth_config:
+  # Per-user connections come back here. Convex owns the handshake: the
+  # callback is a plain HTTP action, and identity is carried by a single-use
+  # state row minted before the browser ever left.
+  redirect_urls:
+    - https://graceful-albatross-202.convex.site/oauth/callback
+
+  scopes:
+    # Posting as the *app*. This is what the outbox connector uses today,
+    # via SLACK_BOT_TOKEN in .env.local.
+    bot:
+      - chat:write # send an approved draft
+      - chat:write.public # post to a channel the bot was never invited to
+      - channels:history # Scout reading public channels
+      - channels:read # resolving channel names to ids
+      - groups:history # private channels the bot is invited to
+      - groups:read
+      - im:history # DMs with the bot
+      - mpim:history # group DMs
+      - users:read # turning U01ABC into a person's name
+      - team:read # workspace name, for the connections panel
+
+    # Posting as the *person* who approved. Slack grants these under
+    # user_scope, which is a separate install flow from the bot token — that
+    # is exactly why per-user auth needs its own OAuth round trip.
+    user:
+      - chat:write
+      - users:read
+      # search:read is user-token-only; bots cannot call search.messages at
+      # all. Add it if you want Scout to search rather than page history.
+      # - search:read
+
+settings:
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  # Leave off unless you enable rotation in the connector too — Intern stores
+  # Slack user tokens as long-lived, with nothing to refresh.
+  token_rotation_enabled: false
+# ---------------------------------------------------------------------------
+# Add later: Scout as a Slack teammate
+#
+# Only once you have a public URL for Scout (ngrok http 8000, or the Railway
+# domain). Then Settings → Event Subscriptions in the app UI, or re-paste this
+# manifest with the block below merged into `settings:`.
+#
+# settings:
+#   event_subscriptions:
+#     request_url: https://YOUR-PUBLIC-HOST/slack/events
+#     bot_events:
+#       - app_mention        # someone @-mentions Scout in a channel
+#       - message.im         # someone DMs Scout
+#   interactivity:
+#     is_enabled: true
+#     request_url: https://YOUR-PUBLIC-HOST/slack/events
+#
+# Slack sends a challenge to request_url on save, so Scout has to be running
+# and reachable before you add it or the save is rejected.
+# ---------------------------------------------------------------------------
