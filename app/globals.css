@@ -1,26 +1,129 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-bg: #08090a;
+  --color-panel: #0b0c0e;
+  --color-raised: #101216;
+  --color-line: #1a1d21;
+  --color-line-2: #262a2f;
+  --color-fg: #e4e6e9;
+  --color-dim: #797f88;
+  --color-faint: #464c54;
+
+  --color-ok: #4ec9a5;
+  --color-warn: #d9a04a;
+  --color-err: #e05a5a;
+  --color-accent: #4ec9a5;
+
+  --color-k-source: #8d97a3;
+  --color-k-contact: #6ee7b7;
+  --color-k-project: #7cb7ff;
+  --color-k-note: #c0a6ff;
+  --color-k-followup: #ffb473;
+  --color-k-wiki: #5fd0d0;
+  --color-k-tag: #565c65;
+  --color-k-intern: #f2f4f6;
+  --color-k-action: #e8788a;
+
+  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo,
+    monospace;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html,
+body {
+  height: 100%;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: #08090a;
+  color: #e4e6e9;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  letter-spacing: -0.01em;
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+}
+
+::selection {
+  background: rgba(78, 201, 165, 0.28);
+  color: #fff;
+}
+
+/* Thin, unobtrusive scrollbars — the panels should read as one surface. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #262a2f transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #22262b;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+input:focus,
+textarea:focus {
+  outline: none;
+}
+
+/* Uppercase micro-label used for every panel header. */
+@utility label {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #464c54;
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.2;
+  }
+}
+
+@utility pulse-slow {
+  animation: pulse-dot 1.6s ease-in-out infinite;
+}
+
+@keyframes blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@utility caret {
+  animation: blink 1.1s step-end infinite;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@utility enter {
+  animation: fade-in 0.18s ease-out both;
 }
