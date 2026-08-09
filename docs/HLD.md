@@ -136,8 +136,23 @@ credential. One field serving provenance, permissions, and the record of who con
 
 ### 6.1 Ingestion
 
+Facts arrive by two paths, and only one of them is ours to authenticate.
+
+**Pushed by a person, through a channel.** Someone points at something — *"add this thread
+to the brain"* — and the channel's own agent reads it and calls our capture tool. VoiceOS
+Agent Mode has built-in Slack, Gmail, Calendar, Notion and Drive connections and can call
+its tool and ours in the same turn, so this path costs us no OAuth at all. It is bounded:
+turn-scoped, under ~30s, and requires a person present and speaking.
+
+**Pulled continuously, by us.** Webhooks and scheduled backfill against our own per-user
+OAuth connections, running whether or not anyone is at a desk. This is the path that keeps
+a shared brain current, and there is nothing to delegate it to — channel integrations are
+sandboxed from each other's credentials, and inbound webhooks are not available to them.
+
+Both paths land in the same place:
+
 ```
-webhook or scheduled backfill
+capture (pushed) or webhook / scheduled backfill (pulled)
   → write observation (idempotent on source_id + external_id)
   → extract candidate facts and relations
   → resolve against existing facts
@@ -188,11 +203,17 @@ confirms it. Graduation is never automatic.
 
 ## 7. Identity, auth and permissions
 
-**People** sign in to the web app. That's the only identity system we own.
+All of it lives in our application. No channel can hold it for us: their integrations are
+sandboxed from one another's credentials, and their permission model has no grant for
+reaching a host's connected accounts. Three surfaces, and we own all three.
+
+**People** sign in to the web app — Supabase Auth, so row-level security keys off
+`auth.uid()` without a second identity system to reconcile.
 
 **Connectors** are per-user OAuth, server-side, with refresh tokens so ingestion continues
 when every laptop is shut. An intern acting for you uses your token, so it can only ever
 reach what you could reach. This removes the need for a policy engine.
+
 
 **Reading the brain** is filtered at query time. Each fact carries `visibility_scopes[]`
 derived from the union of its observations' sources — e.g. `slack:C0192`, `gmail:user:42`,
@@ -203,8 +224,9 @@ code, so a missed check in one query path can't leak.
 Company-wide material (org chart, SOPs, policies) carries `company:public` and everyone
 sees it.
 
-**Machine callers** get an API key bound to a person, with an allowlist of interns. Calls
-inherit that person's scopes. Nothing gets ambient authority.
+**Machine callers** — cron, scripts, a channel integration — get an API key bound to a
+person, with an allowlist of interns. Calls inherit that person's scopes, so nothing gets
+ambient authority. That key is the only secret a channel ever holds.
 
 ## 8. Stack
 
@@ -240,9 +262,12 @@ worth building now; worth not designing against.
 
 1. **Schema and the live graph** — real subscriptions, seeded facts, a fake ingestion writer. Proves the hardest question (does a live graph feel good) before any intern exists.
 2. **One intern end to end** — plan, execute against fixture tools, one handover to a person, edits stored.
-3. **Real ingestion** — one connector, entity resolution, promotion.
-4. **Roster and trust** — several interns, accepted-unedited rate, graduation.
-5. **Channels** — VoiceOS integration and the public agent directory.
+3. **Capture without connectors** — sign-in, API keys, and the pushed path. A person can
+   put facts into the brain through a channel before we have written a single OAuth flow.
+   This is deliberately ahead of step 4: it makes the demo possible without connectors.
+4. **Real ingestion** — the first per-user OAuth connector, entity resolution, promotion.
+5. **Roster and trust** — several interns, accepted-unedited rate, graduation.
+6. **Channels** — the VoiceOS integration proper and the public intern directory.
 
 ## 11. Risks
 
