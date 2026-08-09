@@ -158,24 +158,33 @@ export async function* runStream(
   const decoder = new TextDecoder();
   let buf = "";
 
+  // Agno emits SSE frames; some deployments emit bare NDJSON. Handle both.
+  function* parse(chunk: string): Generator<ScoutEvent> {
+    for (const line of chunk.split("\n")) {
+      const payload = line.startsWith("data:") ? line.slice(5).trim() : line.trim();
+      if (!payload || payload === "[DONE]") continue;
+      try {
+        yield JSON.parse(payload) as ScoutEvent;
+      } catch {
+        /* partial or non-JSON keepalive — skip */
+      }
+    }
+  }
+
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     buf += decoder.decode(value, { stream: true });
 
-    // Agno emits SSE frames; some deployments emit bare NDJSON. Handle both.
     const frames = buf.split(/\n\n/);
     buf = frames.pop() ?? "";
-    for (const frame of frames) {
-      for (const line of frame.split("\n")) {
-        const payload = line.startsWith("data:") ? line.slice(5).trim() : line.trim();
-        if (!payload || payload === "[DONE]") continue;
-        try {
-          yield JSON.parse(payload) as ScoutEvent;
-        } catch {
-          /* partial or non-JSON keepalive — skip */
-        }
-      }
-    }
+    for (const frame of frames) yield* parse(frame);
   }
+
+  // The tail matters. Whatever is left has no trailing blank line, so the loop
+  // above never emitted it — and the last frame of a run is RunCompleted, the
+  // one event carrying the final answer. Dropping it meant every intern
+  // finished with its tool calls logged and no summary, so nothing was ever
+  // parsed out of the result and nothing reached the brain.
+  yield* parse(buf + decoder.decode());
 }
