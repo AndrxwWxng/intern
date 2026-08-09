@@ -42,6 +42,35 @@ type Body = {
   fixed: boolean;
 };
 
+/**
+ * Kinds that live on the window's border rather than in the pile.
+ *
+ * People are drawn around the edge as diamonds: the middle belongs to the work
+ * — facts, projects, whatever an intern is touching — and an org reads better
+ * standing around its work than tangled in it. The simulation still decides
+ * *where* on the rim each person sits, by the angle their links pull them to;
+ * this only fixes the distance.
+ */
+const RIM_KINDS: ReadonlySet<string> = new Set(["contact"]);
+const RIM_INSET = 30;
+
+/** Cast a ray from the viewport centre out to the border rectangle. */
+function pinToBorder(x: number, y: number, w: number, h: number) {
+  const cx = w / 2;
+  const cy = h / 2;
+  let dx = x - cx;
+  let dy = y - cy;
+  if (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001) dy = -1;
+
+  const halfW = Math.max(20, w / 2 - RIM_INSET);
+  const halfH = Math.max(20, h / 2 - RIM_INSET);
+  const t = Math.min(
+    halfW / Math.max(Math.abs(dx), 0.001),
+    halfH / Math.max(Math.abs(dy), 0.001),
+  );
+  return { x: cx + dx * t, y: cy + dy * t };
+}
+
 type Props = {
   graph: Graph;
   selectedId: string | null;
@@ -391,6 +420,15 @@ export default function BrainGraph({
       const sx = (x: number) => x * k + tx;
       const sy = (y: number) => y * k + ty;
 
+      // Resolve every body once — people land on the border, everything else
+      // wherever the simulation put it — so edges and nodes agree.
+      const at = new Map<string, { x: number; y: number }>();
+      for (const b of bodies.current.values()) {
+        const x = sx(b.x);
+        const y = sy(b.y);
+        at.set(b.id, RIM_KINDS.has(b.node.kind) ? pinToBorder(x, y, w, h) : { x, y });
+      }
+
       ctx.lineWidth = Math.max(0.5, 0.7 * k);
       for (const e of g.edges) {
         const p = bodies.current.get(e.source);
@@ -398,13 +436,15 @@ export default function BrainGraph({
         if (!p || !q) continue;
         const f = Math.min(focusOf(p.id), focusOf(q.id));
         if (f <= 0) continue;
+        const pp = at.get(p.id)!;
+        const qq = at.get(q.id)!;
         const lit = sel && (p.id === sel || q.id === sel);
         ctx.strokeStyle = lit
           ? "rgba(78,201,165,0.5)"
           : `rgba(255,255,255,${0.09 * f})`;
         ctx.beginPath();
-        ctx.moveTo(sx(p.x), sy(p.y));
-        ctx.lineTo(sx(q.x), sy(q.y));
+        ctx.moveTo(pp.x, pp.y);
+        ctx.lineTo(qq.x, qq.y);
         ctx.stroke();
       }
 
@@ -413,10 +453,11 @@ export default function BrainGraph({
       for (const b of bodies.current.values()) {
         const f = focusOf(b.id);
         if (f <= 0) continue;
-        const x = sx(b.x);
-        const y = sy(b.y);
+        const rim = RIM_KINDS.has(b.node.kind);
+        const { x, y } = at.get(b.id)!;
         const r = b.r * Math.max(0.55, Math.min(k, 1.7));
-        if (x < -40 || y < -40 || x > w + 40 || y > h + 40) continue;
+        // Pinned nodes are always on screen; only cull the ones that aren't.
+        if (!rim && (x < -40 || y < -40 || x > w + 40 || y > h + 40)) continue;
 
         const color = KIND_COLOR[b.node.kind];
 
@@ -430,7 +471,18 @@ export default function BrainGraph({
         }
 
         ctx.beginPath();
-        ctx.arc(x, y, r, 0, Math.PI * 2);
+        if (rim) {
+          // A person is a diamond. Different shape as well as different place,
+          // so the rim reads as a different class of thing at a glance.
+          const d = r + 2.5;
+          ctx.moveTo(x, y - d);
+          ctx.lineTo(x + d, y);
+          ctx.lineTo(x, y + d);
+          ctx.lineTo(x - d, y);
+          ctx.closePath();
+        } else {
+          ctx.arc(x, y, r, 0, Math.PI * 2);
+        }
         ctx.fillStyle = withAlpha(color, b.id === sel ? 1 : 0.16 + 0.5 * f);
         ctx.fill();
         ctx.lineWidth = b.id === sel || b.id === hoverId.current ? 1.4 : 0.9;
@@ -443,7 +495,9 @@ export default function BrainGraph({
           b.id === hoverId.current ||
           neighbours?.has(b.id) ||
           (mt?.has(b.id) ?? false);
-        if ((k > 0.62 && important) || k > 1.25) labelled.push(b);
+        // People on the rim keep their names at any zoom — a nameless diamond
+        // on the border is not information.
+        if (rim || (k > 0.62 && important) || k > 1.25) labelled.push(b);
       }
 
       // labels last so they sit above the mesh, and never on top of each other
@@ -460,8 +514,9 @@ export default function BrainGraph({
       const taken: [number, number, number, number][] = [];
       for (const b of labelled) {
         const f = focusOf(b.id);
-        const x = sx(b.x);
-        const y = sy(b.y) + b.r * Math.max(0.55, Math.min(k, 1.7)) + 4;
+        const p = at.get(b.id)!;
+        const x = p.x;
+        const y = p.y + b.r * Math.max(0.55, Math.min(k, 1.7)) + 4;
         const label = truncate(b.node.label, 26);
         const wText = ctx.measureText(label).width;
         const box: [number, number, number, number] = [
@@ -525,14 +580,26 @@ export default function BrainGraph({
     return { x: (cx - tx) / k, y: (cy - ty) / k };
   };
 
+  /** Where a body is actually drawn — rim kinds are pinned to the border. */
+  const screenPos = (b: Body) => {
+    const { k, tx, ty } = view.current;
+    const x = b.x * k + tx;
+    const y = b.y * k + ty;
+    if (!RIM_KINDS.has(b.node.kind)) return { x, y };
+    const { w, h } = size.current;
+    return pinToBorder(x, y, w, h);
+  };
+
+  // Screen space, so a pinned person is clickable where you can see it rather
+  // than where the simulation thinks it is.
   const hitTest = (cx: number, cy: number): Body | null => {
-    const { x, y } = toWorld(cx, cy);
     let best: Body | null = null;
     let bestD = Infinity;
     for (const b of bodies.current.values()) {
       if (!live.current.visible.has(b.id)) continue;
-      const d = Math.hypot(b.x - x, b.y - y);
-      const radius = Math.max(b.r + 5, 9 / view.current.k);
+      const p = screenPos(b);
+      const d = Math.hypot(p.x - cx, p.y - cy);
+      const radius = Math.max(b.r * view.current.k + 5, 9);
       if (d < radius && d < bestD) {
         best = b;
         bestD = d;
