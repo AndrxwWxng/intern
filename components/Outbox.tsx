@@ -140,7 +140,6 @@ function Pending({
         <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-k-action pulse-slow" />
         <span className="text-fg">{action.kind}</span>
         <span className="text-k-action">pending</span>
-        <span className="text-faint">{action.role}</span>
         <span className="ml-auto shrink-0 text-faint">{expanded ? "−" : "+"}</span>
       </button>
 
@@ -170,7 +169,7 @@ function Pending({
           {changed.length ? (
             <p className="border-l border-k-fact/50 pl-2 text-k-fact">
               {changed.join(" and ")} changed · approving files the difference as
-              a preference the next {action.role} reads
+              a preference the next intern reads
             </p>
           ) : null}
         </div>

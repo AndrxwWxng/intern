@@ -20,7 +20,7 @@ import {
   getAction,
   getGraph,
   getSystem,
-  graduateRole,
+  graduateKind,
   listActions,
   listQuestions,
   probe,
@@ -32,7 +32,6 @@ import {
   trustRecords,
 } from "./store";
 import * as brain from "./brain";
-import { ROLES, isRoleId } from "./roster";
 import type {
   ActionStatus,
   Draft,
@@ -40,9 +39,9 @@ import type {
   GraphNode,
   InternStatus,
   JournalKind,
-  RoleId,
+  ActionKind,
 } from "./types";
-import { outgoing } from "./types";
+import { ACTION_KINDS, outgoing } from "./types";
 
 export const SERVER_INFO = { name: "intern", version: "0.1.0" };
 
@@ -60,7 +59,7 @@ highest-value thing you can do here: everything the interns do afterwards is
 better for it, for everyone, not just this user.
 
 PUTTING AN INTERN ON SOMETHING. intern_spawn for work that takes minutes rather
-than seconds. interns_roster says who does what and how trusted each one is.
+than seconds.
 
 WHEN AN INTERN ASKS. Interns stop and ask rather than guess. questions_list
 shows what is parked; read the question to the user, then question_answer with
@@ -397,12 +396,6 @@ export const TOOLS: ToolDef[] = [
           type: "string",
           description: "The brief, in plain language. Be specific about the goal.",
         },
-        role: {
-          type: "string",
-          enum: ["researcher", "correspondent", "archivist", "onboarder"],
-          description:
-            "Which intern to put on it. Leave this out and one is chosen from the brief — see interns_roster for what each does.",
-        },
       },
       ["task"],
     ),
@@ -410,11 +403,9 @@ export const TOOLS: ToolDef[] = [
       const task = str(args.task).trim();
       if (!task) return { error: "task is required" };
       await probe();
-      const role = isRoleId(args.role) ? (args.role as RoleId) : undefined;
-      const intern = spawn(task.slice(0, 2000), { ownerId: ctx.ownerId, role });
+      const intern = spawn(task.slice(0, 2000), { ownerId: ctx.ownerId });
       return {
         id: intern.id,
-        role: intern.role,
         status: intern.status,
         mode: intern.mode,
         note: "Running in the background. Check back with intern_get. If it needs something it cannot work out, it will stop and ask — questions_list.",
@@ -422,54 +413,51 @@ export const TOOLS: ToolDef[] = [
     },
   },
   {
-    name: "interns_roster",
-    title: "Who is on the roster and how trusted they are",
+    name: "trust_report",
+    title: "How trusted each kind of outgoing work is",
     description:
-      "The interns available, what each is for, and their accepted-unedited rate — how often a person took their work as written. A role marked ready_to_graduate is waiting for someone to confirm it can work unsupervised; ask the user before calling intern_graduate.",
+      "For each surface work goes out on — email, Slack, calendar — how often a person took the draft as written. A kind marked ready_to_graduate is waiting for someone to confirm it can go out unreviewed; ask the user before calling trust_graduate. Read the counts aloud, not the percentage: \"8 of 9 Slack posts approved unedited\" is what a person can actually act on.",
     inputSchema: obj({}),
     handler: async () => {
       await probe();
-      const trust = new Map(trustRecords().map((t) => [t.role, t]));
       return {
-        roles: ROLES.map((r) => {
-          const t = trust.get(r.id);
-          return {
-            id: r.id,
-            does: r.blurb,
-            decisions: t?.decisions ?? 0,
-            accepted_unedited: t ? `${Math.round(t.rate * 100)}%` : "—",
-            supervised: !t?.graduated,
-            ready_to_graduate: t?.proposed ?? false,
-          };
-        }),
+        kinds: trustRecords().map((t) => ({
+          kind: t.kind,
+          decisions: t.decisions,
+          accepted_unedited: t.decisions ? `${t.unedited} of ${t.decisions}` : "—",
+          supervised: !t.graduated,
+          ready_to_graduate: t.proposed,
+        })),
       };
     },
   },
   {
-    name: "intern_graduate",
-    title: "Let a role work unsupervised, or take it back",
+    name: "trust_graduate",
+    title: "Let a kind of work go out unreviewed, or take it back",
     description:
-      "Confirm a proposed graduation, or revoke one. Only call this when the user has been told the role's record and has explicitly said to do it — after graduation that role's drafts go out without anyone reading them.",
+      "Confirm a proposed graduation, or revoke one. Only call this when the user has been told the record for that kind and has explicitly said to do it — after graduation those drafts go out without anyone reading them.",
     inputSchema: obj(
       {
-        role: {
-          type: "string",
-          enum: ["researcher", "correspondent", "archivist", "onboarder"],
-        },
+        kind: { type: "string", enum: ["email", "slack", "calendar"] },
         confirmed: {
           type: "boolean",
           description: "True to graduate, false to keep it (or put it back) under review.",
         },
       },
-      ["role", "confirmed"],
+      ["kind", "confirmed"],
     ),
     handler: (args) => {
-      if (!isRoleId(args.role)) return { error: `unknown role: ${str(args.role)}` };
-      const record = graduateRole(args.role as RoleId, args.confirmed === true);
+      const kind = str(args.kind) as ActionKind;
+      if (!ACTION_KINDS.includes(kind)) {
+        return { error: `unknown kind: ${str(args.kind)}` };
+      }
+      const record = graduateKind(kind, args.confirmed === true);
       return {
-        role: record.role,
+        kind: record.kind,
         supervised: !record.graduated,
-        accepted_unedited: `${Math.round(record.rate * 100)}%`,
+        accepted_unedited: record.decisions
+          ? `${record.unedited} of ${record.decisions}`
+          : "—",
       };
     },
   },
@@ -491,7 +479,6 @@ export const TOOLS: ToolDef[] = [
         questions: rows.map((q) => ({
           id: q.id,
           asked_by: q.internId,
-          role: q.role,
           question: q.question,
           context: q.context,
           status: q.status,

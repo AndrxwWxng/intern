@@ -1,15 +1,15 @@
 "use client";
 
 import { KIND_COLOR, KIND_ORDER } from "./BrainGraph";
-import Roster from "./Roster";
+import Trust from "./Trust";
 import type {
   BrainStats,
   ActionKind,
   ConnectorsState,
   Graph,
   GraphNode,
+  ActionKind,
   NodeKind,
-  RoleId,
   SystemState,
   TrustRecord,
 } from "@/lib/types";
@@ -34,7 +34,7 @@ export default function BrainRail({
   onConnect: (kind: ActionKind) => void;
   trust: TrustRecord[];
   brain: BrainStats | null;
-  onGraduate: (role: RoleId, confirmed: boolean) => void;
+  onGraduate: (kind: ActionKind, confirmed: boolean) => void;
   graph: Graph;
   hidden: Set<NodeKind>;
   onToggleKind: (k: NodeKind) => void;
@@ -191,8 +191,8 @@ export default function BrainRail({
         )}
       </Section>
 
-      <Section title="roster">
-        <Roster trust={trust} brain={brain} onGraduate={onGraduate} />
+      <Section title="trust">
+        <Trust trust={trust} brain={brain} onGraduate={onGraduate} />
       </Section>
 
       <Section title="layers">

@@ -35,18 +35,15 @@ SCOUT_AGENT_ID=scout                  # default
 To run the real backend, follow [`scout/README.md`](./scout/README.md)
 (`docker compose up -d --build`).
 
-## The roster
+## Trust
 
-An intern is not a generic runner — it has a job description, and that is what
-makes trust mean anything. One is picked from the brief, or name it yourself
-with `spawn as <role>`.
+Interns have no job titles. A person does many kinds of task and so does an
+intern, so sorting them into roles produced a number nobody could act on.
 
-| Role | Does |
-|---|---|
-| `researcher` | maps a topic across every source and files what it finds |
-| `correspondent` | drafts what needs to go out, and never sends it |
-| `archivist` | turns what's scattered into something the brain can cite |
-| `onboarder` | sets a person up, and asks before it guesses |
+What a person actually decides on is something going out, and those have a real
+type. Trust is tracked against that — `email`, `slack`, `calendar` — which makes
+it a true statement about a capability (*8 of 9 Slack posts approved unedited*)
+and lines the record up exactly with what graduation switches off.
 
 ## Using it
 
@@ -54,7 +51,6 @@ Everything runs from the command bar at the bottom. Bare text is a brief.
 
 ```
 spawn      map every mention of the ramp pilot across slack, drive and the wiki
-spawn as   correspondent  reply to dan about the data room
 ask        who owns the git-backed wiki
 capture    Mara wants the pilot Slack-first, no new dashboard
 kill       int-01kx
@@ -62,7 +58,7 @@ kill       int-01kx
 outbox · approve act-01hw · reject act-01hw we never open with "Following up"
 asks   · answer ask-01z2 she reports to Ana on the GTM design team
 
-roster · graduate correspondent · supervise correspondent
+trust  · graduate slack · supervise slack
 focus  int-01kx | all
 graph  refresh
 clear · help
@@ -112,15 +108,15 @@ which is what "facts are a projection" has to mean if it means anything.
 Approving a draft the intern got wrong teaches it nothing. So the outbox lets
 you rewrite it in place, and keeps **both halves** — what the intern proposed
 and what you were actually willing to send. That difference becomes a
-preference fact, and the next intern of that role reads it before it starts:
+preference fact, and the next intern reads it before it starts:
 
 ```
 you edit the subject and body, then approve
        ↓
-fact-005  "correspondent: subject and body rewritten before sending"
+fact-005  "email: subject and body rewritten before sending"
           (proposed and accepted, both in full)
        ↓
-next correspondent spawns → "recalled 1 fact from the brain · fact-005"
+next intern spawns → "recalled 1 fact from the brain · fact-005"
 ```
 
 Rejecting works the same way: the reason you give is filed as a correction.
@@ -221,7 +217,7 @@ it shows up. Leave it on until you have watched a few drafts go through.
 | `brain_capture` | put something into the brain — idempotent, no integration needed |
 | `brain_timeline` | what has been observed, decided, asked and sent |
 | `intern_spawn` `interns_list` `intern_get` `intern_cancel` | run the workforce |
-| `interns_roster` `intern_graduate` | who does what, how trusted, and confirming it |
+| `trust_report` `trust_graduate` | how trusted each outgoing surface is, and confirming it |
 | `questions_list` `question_answer` | unblock an intern that stopped to ask |
 | `outbox_list` `outbox_get` | see what's waiting |
 | `outbox_approve` `outbox_reject` | decide, with `confirmed` required |
@@ -246,13 +242,13 @@ app/api/ask         one-shot question, answer streams back over /api/events
 app/api/outbox      GET drafts · POST a decision (with optional edits) on one
 app/api/capture     POST an observation into the brain
 app/api/questions   GET what interns are stuck on · POST an answer
-app/api/roster      GET roles and trust · POST a graduation decision
+app/api/trust       GET trust per action kind · POST a graduation decision
 app/api/mcp         MCP server — the URL VoiceOS connects to
 app/api/connectors  GET which outbound surfaces are wired up
 
 lib/brain.ts        observations, facts, provenance, the append-only log
-lib/roster.ts       the job descriptions, and picking one from a brief
-lib/trust.ts        accepted-unedited rate, graduation, revocation
+lib/trust.ts        accepted-unedited rate per action kind, graduation, revocation
+lib/action-block.ts the ```action block an intern ends its report with, parsed
 lib/store.ts        intern registry, run loop, outbox, questions, event bus
 lib/scout.ts        Scout client — health, contexts, graph, streamed runs
 lib/sim.ts          seeded brain + scripted intern traces for SIM mode

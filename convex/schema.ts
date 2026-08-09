@@ -33,14 +33,6 @@ const draft = v.object({
   body: v.string(),
 });
 
-/** Trust is tracked per role, so every proposal has to carry one. */
-const roleId = v.union(
-  v.literal("researcher"),
-  v.literal("correspondent"),
-  v.literal("archivist"),
-  v.literal("onboarder"),
-);
-
 /** Every outbound surface a person can connect their own account to. */
 const provider = v.union(v.literal("google"), v.literal("slack"));
 
@@ -219,7 +211,8 @@ export default defineSchema({
    */
   decisions: defineTable({
     actionId: v.string(),
-    role: v.string(),
+    /** Which surface it went out on — trust is earned per kind, not per intern. */
+    kind: v.string(),
     outcome: v.union(v.literal("unedited"), v.literal("edited"), v.literal("rejected")),
     at: v.number(),
   }).index("by_actionId", ["actionId"]),
@@ -309,7 +302,6 @@ export default defineSchema({
      * owner; those are readable by nobody, which is the safe direction.
      */
     ownerId: v.optional(v.id("users")),
-    role: roleId,
     kind: v.union(v.literal("email"), v.literal("slack"), v.literal("calendar")),
     status: v.union(
       v.literal("pending"),

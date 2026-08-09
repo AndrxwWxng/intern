@@ -1,7 +1,5 @@
 import { requireViewer } from "@/lib/auth";
-import { isRoleId } from "@/lib/roster";
 import { probe, snapshot, spawn } from "@/lib/store";
-import type { RoleId } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -20,13 +18,9 @@ export async function POST(request: Request) {
   if (who instanceof Response) return who;
 
   let task = "";
-  let role: RoleId | undefined;
   try {
-    const body = (await request.json()) as { task?: string; role?: string };
+    const body = (await request.json()) as { task?: string };
     task = (body.task ?? "").trim();
-    // An unknown role is not worth failing over — one gets picked from the
-    // brief, which is what happens when none is given anyway.
-    if (isRoleId(body.role)) role = body.role;
   } catch {
     return Response.json({ error: "invalid json body" }, { status: 400 });
   }
@@ -35,8 +29,5 @@ export async function POST(request: Request) {
   if (task.length > 2000) task = task.slice(0, 2000);
 
   await probe();
-  return Response.json(
-    { intern: spawn(task, { ownerId: who.userId, role }) },
-    { status: 201 },
-  );
+  return Response.json({ intern: spawn(task, { ownerId: who.userId }) }, { status: 201 });
 }

@@ -20,7 +20,7 @@ from agno.context.provider import ContextProvider
 from agno.context.slack import SlackContextProvider
 from agno.context.web.parallel import ParallelBackend
 from agno.context.web.parallel_mcp import ParallelMCPBackend
-from agno.context.web.provider import WebContextProvider
+from agno.context.web.provider import DEFAULT_WEB_INSTRUCTIONS, WebContextProvider
 from agno.context.wiki import FileSystemBackend, GitBackend, WikiContextProvider
 from agno.context.workspace import WorkspaceContextProvider
 from agno.run import RunContext
@@ -160,11 +160,38 @@ async def setup_context_providers() -> list[ContextProvider]:
     return providers
 
 
+# Appended to agno's own web instructions rather than replacing them — the
+# default workflow (search, fetch for depth, cross-check, cite) is the part
+# worth keeping.
+#
+# ponytail: a budget written into the prompt, because agno has no per-provider
+# tool-call cap. If the prompt stops being respected the real fix is a hard cap
+# in the backend, not more words here.
+WEB_BUDGET = """
+
+Search budget — you share one rate limit with every other sub-agent running
+alongside you, so an expensive answer costs someone else theirs:
+
+6. **Three searches, then answer with what you have.** Prefer one broad query
+   over several narrow ones. Fetch a page only when the excerpts genuinely do
+   not settle it.
+7. **Never repeat a search that failed.** An error or an empty result *is* the
+   answer: say the web could not confirm it. Retrying burns the whole budget
+   and still returns nothing.
+"""
+
+
 def _create_web_provider() -> WebContextProvider:
-    model = default_model()
-    if getenv("PARALLEL_API_KEY"):
-        return WebContextProvider(backend=ParallelBackend(), model=model)
-    return WebContextProvider(backend=ParallelMCPBackend(), model=model)
+    # Serial tool calls here, unlike everywhere else. This sub-agent fans out
+    # searches, and firing six at once is what actually pins the account's
+    # tokens-per-minute ceiling: one brief on 2026-08-09 spent its last ninety
+    # seconds getting 429s and empty results, and filed nothing from the web.
+    # The top-level agent keeps its parallelism — three *different* sources at
+    # once is cheap and is most of why a run finishes in three minutes.
+    model = default_model(parallel_tool_calls=False)
+    instructions = DEFAULT_WEB_INSTRUCTIONS + WEB_BUDGET
+    backend = ParallelBackend() if getenv("PARALLEL_API_KEY") else ParallelMCPBackend()
+    return WebContextProvider(backend=backend, model=model, instructions=instructions)
 
 
 def _create_workspace_provider() -> WorkspaceContextProvider:
