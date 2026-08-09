@@ -23,7 +23,7 @@ from functools import lru_cache
 
 from agno.db.postgres import PostgresDb
 from agno.knowledge import Knowledge
-from agno.knowledge.embedder.openai import OpenAIEmbedder
+from agno.knowledge.embedder.google import GeminiEmbedder
 from agno.vectordb.pgvector import PgVector, SearchType
 from sqlalchemy import Engine, create_engine, event, text
 
@@ -118,7 +118,10 @@ def create_knowledge(name: str, table_name: str) -> Knowledge:
             db_url=db_url,
             table_name=table_name,
             search_type=SearchType.hybrid,
-            embedder=OpenAIEmbedder(id="text-embedding-3-small"),
+            # gemini-embedding-001 at 1536 dimensions — the same width as the
+            # text-embedding-3-small it replaces, so the pgvector column is
+            # unchanged and nothing needs reindexing.
+            embedder=GeminiEmbedder(),
         ),
         contents_db=get_postgres_db(contents_table=f"{table_name}_contents"),
     )

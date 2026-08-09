@@ -97,3 +97,5 @@ websockets==16.0
 wrapt==1.17.3
 yarl==1.23.0
 zipp==3.23.1
+google-genai==1.51.0
+tenacity==9.1.2
