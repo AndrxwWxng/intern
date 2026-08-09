@@ -29,14 +29,18 @@ export default function SignIn() {
       await signIn("password", form);
     } catch (err) {
       // Convex auth deliberately doesn't say which half was wrong, so we
-      // don't invent a distinction the server refused to make.
+      // don't invent a distinction the server refused to make. The one case
+      // it *is* explicit about is a taken email, which surfaces as an
+      // "already exists" throw from createAccountFromCredentials.
       const raw = err instanceof Error ? err.message : String(err);
       setError(
-        /InvalidAccountId|InvalidSecret/i.test(raw)
-          ? mode === "signIn"
-            ? "No account with that email and password."
-            : "That email is already taken, or the password is too short (8+)."
-          : raw.replace(/^\[.*?\]\s*/, "").slice(0, 200),
+        /already exists/i.test(raw)
+          ? "That email already has an account — switch to sign in."
+          : /InvalidAccountId|InvalidSecret/i.test(raw)
+            ? mode === "signIn"
+              ? "No account with that email and password."
+              : "That email is already taken, or the password is too short (8+)."
+            : raw.replace(/^\[.*?\]\s*/, "").slice(0, 200),
       );
       setBusy(false);
     }

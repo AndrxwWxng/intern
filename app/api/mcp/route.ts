@@ -6,6 +6,7 @@
  * which covers both shapes of client without pulling in the SDK.
  */
 
+import { viewerFor } from "@/lib/auth";
 import { SERVER_INFO, SERVER_INSTRUCTIONS, callTool, listTools } from "@/lib/mcp";
 import { probe } from "@/lib/store";
 
@@ -39,7 +40,10 @@ export async function OPTIONS() {
   return new Response(null, { status: 204, headers: CORS });
 }
 
-async function handle(req: RpcRequest): Promise<RpcResponse | null> {
+async function handle(
+  req: RpcRequest,
+  ownerId: string | null,
+): Promise<RpcResponse | null> {
   const id = req.id ?? null;
   const reply = (result: unknown): RpcResponse => ({ jsonrpc: "2.0", id, result });
   const fail = (code: number, message: string): RpcResponse => ({
@@ -73,7 +77,16 @@ async function handle(req: RpcRequest): Promise<RpcResponse | null> {
       const name = String(req.params?.name ?? "");
       const args = (req.params?.arguments ?? {}) as Record<string, unknown>;
       if (!name) return fail(-32602, "missing tool name");
-      return reply(await callTool(name, args));
+      // Every tool reads or writes somebody's interns, drafts or questions, so
+      // there is no anonymous call. `initialize`, `ping` and `tools/list` stay
+      // open — they describe the server, not anyone's work.
+      if (!ownerId) {
+        return fail(
+          -32001,
+          "not signed in: send the Intern auth token as `Authorization: Bearer <token>`",
+        );
+      }
+      return reply(await callTool(name, args, { ownerId }));
     }
 
     case "resources/list":
@@ -97,11 +110,13 @@ export async function POST(request: Request) {
     );
   }
 
+  const viewer = await viewerFor(request);
+
   const batch = Array.isArray(body);
   const requests: RpcRequest[] = batch ? (body as RpcRequest[]) : [body as RpcRequest];
   const responses: RpcResponse[] = [];
   for (const req of requests) {
-    const res = await handle(req);
+    const res = await handle(req, viewer?.userId ?? null);
     if (res) responses.push(res);
   }
 

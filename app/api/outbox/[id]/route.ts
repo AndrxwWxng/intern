@@ -1,3 +1,4 @@
+import { requireViewer } from "@/lib/auth";
 import { approveAndSend, rejectAction } from "@/lib/store";
 import type { Draft } from "@/lib/types";
 
@@ -39,6 +40,9 @@ export async function POST(
   request: Request,
   ctx: RouteContext<"/api/outbox/[id]">,
 ) {
+  const who = await requireViewer(request);
+  if (who instanceof Response) return who;
+
   const { id } = await ctx.params;
   let body: { decision?: string; reason?: string; edits?: unknown };
   try {
@@ -56,6 +60,7 @@ export async function POST(
       id,
       "cockpit",
       edits(body.edits),
+      who.userId,
     );
     if (!action) {
       return Response.json({ error: `no pending action ${id}` }, { status: 400 });
@@ -68,6 +73,7 @@ export async function POST(
       id,
       body.reason ?? "rejected in the cockpit",
       "cockpit",
+      who.userId,
     );
     return action
       ? Response.json({ action, dispatched: false })
