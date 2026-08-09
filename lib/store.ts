@@ -18,12 +18,31 @@ import type {
   ActionKind,
   ActionStatus,
   Draft,
+  Fact,
   Mode,
   ProposedAction,
+  Question,
+  RoleId,
   SystemState,
 } from "./types";
+import { outgoing } from "./types";
 import * as scout from "./scout";
-import { planSim, seedGraph, simOutboundDraft, simSummary } from "./sim";
+import {
+  planSim,
+  seedGraph,
+  simOutboundDraft,
+  simQuestion,
+  simSummary,
+} from "./sim";
+import {
+  DRY_RUN,
+  connectorFor,
+  connectorStatus,
+  execute,
+} from "./connectors";
+import * as brain from "./brain";
+import { DEFAULT_ROLE, getRole, pickRole } from "./roster";
+import * as trust from "./trust";
 
 const LOG_CAP = 1200;
 const MAX_CONCURRENT = 4;
@@ -40,6 +59,9 @@ type Store = {
   graph: Graph;
   system: SystemState;
   outbox: Map<string, ProposedAction>;
+  questions: Map<string, Question>;
+  /** The last graph read from Scout or seeded, before our facts are grafted on. */
+  base: Graph;
   subs: Set<Subscriber>;
   probing: Promise<void> | null;
   lastProbe: number;
@@ -67,6 +89,8 @@ function create(): Store {
       note: "probing brain…",
     },
     outbox: new Map(),
+    questions: new Map(),
+    base: seedGraph(),
     subs: new Set(),
     probing: null,
     lastProbe: 0,
@@ -129,6 +153,9 @@ export const snapshot = () => ({
   system: store.system,
   graph: store.graph,
   outbox: listActions(),
+  questions: listQuestions(),
+  trust: trust.all(),
+  brain: brain.stats(),
 });
 
 export const getGraph = () => store.graph;
@@ -136,7 +163,38 @@ export const getSystem = () => store.system;
 
 // ---------------------------------------------------------------------------
 // Graph mutation
+//
+// Two things feed the picture: whatever Scout projects (or the seed, offline)
+// and the facts we hold ourselves. The second must survive a re-read of the
+// first, so `base` is kept aside and our projection is grafted back on top
+// every time the base changes. Otherwise a `graph refresh` would quietly erase
+// everything captured since the last one.
 // ---------------------------------------------------------------------------
+
+function setBase(next: Graph) {
+  store.base = next;
+  const facts = brain.projection();
+  const byId = new Map(next.nodes.map((n) => [n.id, n]));
+  for (const n of facts.nodes) byId.set(n.id, n);
+
+  const seen = new Set(next.edges.map((e) => `${e.source}->${e.target}`));
+  const edges = [...next.edges];
+  for (const e of facts.edges) {
+    const key = `${e.source}->${e.target}`;
+    if (seen.has(key) || !byId.has(e.source) || !byId.has(e.target)) continue;
+    seen.add(key);
+    edges.push(e);
+  }
+
+  store.graph = {
+    ...next,
+    nodes: [...byId.values()],
+    edges,
+    generatedAt: Date.now(),
+  };
+  emit({ type: "graph", graph: store.graph });
+  emit({ type: "brain", brain: brain.stats() });
+}
 
 function setGraph(next: Graph) {
   store.graph = next;
@@ -168,6 +226,9 @@ function graft(nodes: GraphNode[], edges: GraphEdge[]) {
 // ---------------------------------------------------------------------------
 
 export async function probe(force = false): Promise<SystemState> {
+  // Replaying the log is idempotent and only ever happens once, but every
+  // entry point goes through here, so this is the one place it needs to be.
+  await brain.ready();
   const fresh = Date.now() - store.lastProbe < 15_000;
   if (!force && fresh) return store.system;
   if (store.probing) {
@@ -200,7 +261,7 @@ export async function probe(force = false): Promise<SystemState> {
       await refreshGraph();
     } else if (!reachable && prev.mode === "live") {
       log(null, "warn", `lost brain at ${scout.SCOUT_URL} · falling back to SIM`);
-      setGraph(seedGraph());
+      setBase(seedGraph());
     }
   })();
 
@@ -216,13 +277,13 @@ export async function refreshGraph(): Promise<Graph> {
   if (store.system.reachable) {
     const g = await scout.graph();
     if (g) {
-      setGraph(g);
-      return g;
+      setBase(g);
+      return store.graph;
     }
     log(null, "warn", "brain returned no graph — keeping what we have");
     return store.graph;
   }
-  setGraph(seedGraph());
+  setBase(seedGraph());
   return store.graph;
 }
 
@@ -230,20 +291,29 @@ export async function refreshGraph(): Promise<Graph> {
 // Interns
 // ---------------------------------------------------------------------------
 
-let counter = 0;
+// Seeded from what is already there: hot reload replaces this module but keeps
+// the store on `globalThis`, so a counter starting from zero would hand out ids
+// that already belong to something.
+let counter = store.interns.size;
 
-export function spawn(task: string): Intern {
+export function spawn(
+  task: string,
+  opts: { role?: RoleId; resumes?: string } = {},
+): Intern {
   const n = ++counter;
   const id = `int-${n.toString(36).padStart(2, "0")}${Math.random()
     .toString(36)
     .slice(2, 4)}`;
+  const role = opts.role ?? pickRole(task);
   const intern: Intern = {
     id,
     handle: id,
     task,
+    role,
     status: "queued",
     mode: store.system.reachable ? "live" : "sim",
     createdAt: Date.now(),
+    resumes: opts.resumes,
     tools: [],
     toolCalls: 0,
     artifacts: [],
@@ -253,12 +323,28 @@ export function spawn(task: string): Intern {
 
   // The intern is a first-class node in the brain while it works.
   graft(
-    [{ id, label: id, kind: "intern", weight: 5, detail: task.slice(0, 80) }],
+    [
+      {
+        id,
+        label: id,
+        kind: "intern",
+        weight: 5,
+        detail: `${role} · ${task.slice(0, 70)}`,
+      },
+    ],
     [{ source: "brain", target: id, rel: "dispatched" }],
   );
 
   emit({ type: "intern", intern });
-  log(id, "sys", `spawned · ${task}`);
+  log(id, "sys", `spawned as ${role} · ${task}`);
+  brain.note({
+    kind: "spawn",
+    actor: "you",
+    internId: id,
+    sourceId: null,
+    ref: id,
+    detail: `${role}: ${task.slice(0, 120)}`,
+  });
 
   store.queue.push(id);
   pump();
@@ -336,10 +422,41 @@ async function run(intern: Intern) {
 const elapsed = (i: Intern) =>
   `${(((i.endedAt ?? Date.now()) - (i.startedAt ?? i.createdAt)) / 1000).toFixed(1)}s`;
 
-const BRIEF = (task: string) => `You are an intern working a long-running task for the team.
+/**
+ * Everything the brain has learned about how this role should work, rendered
+ * for the brief.
+ *
+ * This is the entire learning loop and it is deliberately this small: a person
+ * corrects a draft, the correction becomes a fact, the next brief retrieves it,
+ * behaviour changes. Nobody wrote a rule and there is no training job.
+ */
+function recalled(intern: Intern): { text: string; facts: Fact[] } {
+  const preferences = brain.preferencesFor(intern.role, 5);
+  const context = brain.recall(intern.task, { limit: 4 }).filter(
+    (f) => !preferences.some((p) => p.id === f.id),
+  );
+  const facts = [...preferences, ...context];
+  if (!facts.length) return { text: "", facts };
 
-TASK: ${task}
+  const lines = facts.map(
+    (f) => `- [${f.id}] ${f.title}${f.body ? `\n    ${f.body.replace(/\n+/g, " ").slice(0, 400)}` : ""}`,
+  );
+  return {
+    text: `
+WHAT THE BRAIN ALREADY KNOWS — earned from earlier work, follow it:
+${lines.join("\n")}
+`,
+    facts,
+  };
+}
 
+const BRIEF = (intern: Intern, learned: string) =>
+  `You are an intern working a long-running task for the team.
+
+${getRole(intern.role).charter}
+
+TASK: ${intern.task}
+${learned}
 Work it end to end. Navigate the sources you need — do not guess. When you have
 something durable, file it: prose and decisions into the knowledge wiki via
 update_knowledge, structured facts (people, projects, notes, follow-ups) into the
@@ -356,7 +473,19 @@ fenced block, using query_voice first so the draft is in the house style:
  "rationale":"why this should go out","sources":["what you based it on"]}
 \`\`\`
 
-A human approves it before anything is sent.`;
+A human approves it before anything is sent.
+
+If something the task left out cannot be resolved from the brain — who someone
+reports to, which of two people was meant, a date nobody stated — do NOT pick
+the likely one. Stop and ask, with exactly one fenced block:
+
+\`\`\`question
+{"question":"the one thing you need answered","context":"what you were doing and what you already tried"}
+\`\`\`
+
+A wrong guess quietly poisons everything downstream of it; a question costs
+someone ten seconds. Ask at most one per run, and only when you are genuinely
+blocked.`;
 
 async function runLive(intern: Intern, signal: AbortSignal) {
   let buffer = "";
@@ -366,7 +495,18 @@ async function runLive(intern: Intern, signal: AbortSignal) {
     if (text) log(intern.id, "out", text);
   };
 
-  for await (const ev of scout.runStream(BRIEF(intern.task), {
+  const learned = recalled(intern);
+  if (learned.facts.length) {
+    log(
+      intern.id,
+      "sys",
+      `recalled ${learned.facts.length} fact${learned.facts.length === 1 ? "" : "s"} from the brain · ${learned.facts
+        .map((f) => f.id)
+        .join(" ")}`,
+    );
+  }
+
+  for await (const ev of scout.runStream(BRIEF(intern, learned.text), {
     sessionId: intern.sessionId,
     signal,
   })) {
@@ -425,7 +565,14 @@ async function runLive(intern: Intern, signal: AbortSignal) {
   flush();
 
   if (intern.summary) {
-    const proposed = parseProposedAction(intern.summary, intern.id);
+    // A question outranks a proposal: an intern that asked and also drafted
+    // built that draft on the assumption it just said it could not make.
+    const asked = parseQuestion(intern.summary, intern);
+    if (asked) {
+      park(intern, asked);
+      return;
+    }
+    const proposed = parseProposedAction(intern.summary, intern);
     if (proposed) {
       intern.artifacts.push({
         kind: "answer",
@@ -439,6 +586,18 @@ async function runLive(intern: Intern, signal: AbortSignal) {
 }
 
 async function runSim(intern: Intern, signal: AbortSignal) {
+  const learned = recalled(intern);
+  if (learned.facts.length) {
+    log(
+      intern.id,
+      "sys",
+      `recalled ${learned.facts.length} fact${learned.facts.length === 1 ? "" : "s"} from the brain · ${learned.facts
+        .map((f) => f.id)
+        .join(" ")}`,
+    );
+  }
+
+  const question = simQuestion(intern.task, intern.role);
   const steps = planSim(intern.task, intern.id);
   for (const step of steps) {
     await sleep(step.delay, signal);
@@ -456,12 +615,23 @@ async function runSim(intern: Intern, signal: AbortSignal) {
       touch(intern);
     }
     if (step.graft) graft(step.graft.nodes, step.graft.edges);
+
+    // The simulated intern hits the thing it cannot resolve part-way through,
+    // the same as a real one would, and stops there rather than at the end.
+    if (question && step.level === "ok" && !intern.blockedBy) {
+      park(intern, askQuestion(intern, question.question, question.context));
+      return;
+    }
   }
   intern.summary = simSummary(intern.task);
 
   const outbound = simOutboundDraft(intern.task);
   if (outbound) {
-    const proposed = proposeAction({ internId: intern.id, ...outbound });
+    const proposed = proposeAction({
+      internId: intern.id,
+      role: intern.role,
+      ...outbound,
+    });
     intern.artifacts.push({
       kind: "answer",
       label: `proposed email: ${proposed.draft.subject}`,
@@ -487,6 +657,250 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Questions — the other kind of handover
+//
+// An approval gate is a handover whose recipient happens to be a person. So is
+// a question. The only difference is which way the information flows, which is
+// why they share the parking, the graph node and the resume path.
+//
+// Parked means parked: there is no timeout that eventually guesses.
+// ---------------------------------------------------------------------------
+
+let questionCounter = store.questions.size;
+
+export const listQuestions = (status?: Question["status"]): Question[] => {
+  const all = [...store.questions.values()].sort((a, b) => b.askedAt - a.askedAt);
+  return status ? all.filter((q) => q.status === status) : all;
+};
+
+export const getQuestion = (id: string) => store.questions.get(id) ?? null;
+
+export function askQuestion(
+  intern: Intern,
+  question: string,
+  context: string,
+): Question {
+  const id = `ask-${(++questionCounter).toString(36).padStart(2, "0")}${Math.random()
+    .toString(36)
+    .slice(2, 4)}`;
+  const row: Question = {
+    id,
+    internId: intern.id,
+    role: intern.role,
+    question: question.slice(0, 500),
+    context: context.slice(0, 1000),
+    status: "open",
+    askedAt: Date.now(),
+  };
+  store.questions.set(id, row);
+  emit({ type: "question", question: row });
+  log(intern.id, "warn", `asks: ${row.question}`);
+  brain.note({
+    kind: "question",
+    actor: "system",
+    internId: intern.id,
+    sourceId: null,
+    ref: id,
+    detail: row.question,
+  });
+
+  graft(
+    [
+      {
+        id,
+        label: `? ${row.question}`.slice(0, 56),
+        kind: "question",
+        weight: 4,
+        detail: "waiting on a person",
+      },
+    ],
+    [{ source: intern.id, target: id, rel: "asks" }],
+  );
+  return row;
+}
+
+/** Stop the intern where it stands and hand the work to a person. */
+function park(intern: Intern, question: Question) {
+  intern.status = "waiting";
+  intern.blockedBy = question.id;
+  intern.endedAt = Date.now();
+  touch(intern);
+  log(intern.id, "sys", `parked · waiting on ${question.id}`);
+}
+
+/**
+ * Answer a question. The answer becomes a fact first — so it is there for
+ * every future task, not just this one — and only then is the parked work
+ * picked back up.
+ */
+export function answerQuestion(
+  id: string,
+  answer: string,
+  actor = "you",
+): { question: Question; resumed: Intern | null } | null {
+  const question = store.questions.get(id);
+  if (!question || question.status !== "open") return null;
+
+  question.status = "answered";
+  question.answer = answer.slice(0, 2000);
+  question.answeredAt = Date.now();
+
+  const fact = brain.learn({
+    kind: "answer",
+    title: question.question,
+    body: answer,
+    actor,
+    subject: question.role,
+    tags: ["answered"],
+    internId: question.internId,
+  });
+  log(question.internId, "ok", `${id} answered · filed as ${fact.id}`);
+  brain.note({
+    kind: "answer",
+    actor,
+    internId: question.internId,
+    sourceId: null,
+    ref: id,
+    detail: answer.slice(0, 160),
+  });
+
+  // Re-project first so the new fact is a node the edge can actually attach to.
+  setBase(store.base);
+  graft(
+    [
+      {
+        id,
+        label: `? ${question.question}`.slice(0, 56),
+        kind: "question",
+        weight: 4,
+        detail: `answered · ${answer.slice(0, 60)}`,
+      },
+    ],
+    [{ source: id, target: fact.id, rel: "answered" }],
+  );
+
+  // Resume by dispatching a fresh intern that inherits the answer. A run that
+  // has already ended cannot be rewound, and pretending otherwise would mean
+  // replaying tool calls that already happened.
+  let resumed: Intern | null = null;
+  const parked = question.internId ? store.interns.get(question.internId) : null;
+  if (parked && parked.status === "waiting") {
+    parked.status = "done";
+    parked.blockedBy = undefined;
+    touch(parked);
+    resumed = spawn(
+      `${parked.task}\n\nYou asked: ${question.question}\nThe answer is: ${answer}\nCarry on from there.`,
+      { role: parked.role, resumes: parked.id },
+    );
+    question.resumedBy = resumed.id;
+    graft([], [{ source: id, target: resumed.id, rel: "resumed" }]);
+  }
+
+  emit({ type: "question", question });
+  emit({ type: "brain", brain: brain.stats() });
+  return { question, resumed };
+}
+
+/** The question doesn't need answering after all. The work stays stopped. */
+export function dismissQuestion(id: string): Question | null {
+  const question = store.questions.get(id);
+  if (!question || question.status !== "open") return null;
+  question.status = "dismissed";
+  question.answeredAt = Date.now();
+  const parked = question.internId ? store.interns.get(question.internId) : null;
+  if (parked && parked.status === "waiting") {
+    parked.status = "cancelled";
+    parked.blockedBy = undefined;
+    touch(parked);
+  }
+  emit({ type: "question", question });
+  log(question.internId, "warn", `${id} dismissed`);
+  return question;
+}
+
+/**
+ * Pull a question out of an intern's final report — same fenced-block trick as
+ * the action block, and for the same reason: one deterministic parse beats
+ * asking a model to reliably signal intent in prose.
+ */
+export function parseQuestion(report: string, intern: Intern): Question | null {
+  const match = report.match(/```question\s*([\s\S]*?)```/);
+  if (!match) return null;
+  try {
+    const raw = JSON.parse(match[1].trim()) as {
+      question?: string;
+      context?: string;
+    };
+    if (!raw.question) return null;
+    return askQuestion(intern, raw.question, raw.context ?? intern.task);
+  } catch {
+    log(intern.id, "warn", "final report had a question block that wasn't valid JSON");
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Capture — the pushed ingestion path
+//
+// Someone points at something and says "add this to the brain". The channel's
+// own agent reads it and calls this; no OAuth of ours is involved, which is
+// exactly why this path exists before any connector does.
+//
+// Idempotent by construction: the same thing captured twice is one observation
+// with one fact, so a retry, a double-tap or two people forwarding the same
+// message all land the same way.
+// ---------------------------------------------------------------------------
+
+export async function capture(input: {
+  sourceId?: string;
+  externalId?: string;
+  actor?: string;
+  title: string;
+  body: string;
+  url?: string;
+  tags?: string[];
+  kind?: Fact["kind"];
+  /** Also put an archivist on writing it into the wiki properly. */
+  file?: boolean;
+}): Promise<{ fact: Fact; fresh: boolean; merged: boolean; intern: Intern | null }> {
+  await brain.ready();
+
+  const hint = { kind: input.kind ?? ("note" as const), tags: input.tags };
+  const { observation, fresh } = brain.record({
+    sourceId: input.sourceId ?? "capture",
+    externalId: input.externalId,
+    actor: input.actor ?? "you",
+    title: input.title,
+    body: input.body,
+    url: input.url,
+    hint,
+  });
+  const { fact, merged } = brain.promote(observation, hint);
+
+  log(
+    null,
+    fresh ? "ok" : "sys",
+    fresh
+      ? `captured ${observation.id} → ${merged ? `corroborates ${fact.id}` : `new fact ${fact.id}`} · ${fact.title}`
+      : `already had that one · ${observation.id} → ${fact.id}`,
+  );
+
+  setBase(store.base);
+
+  let intern: Intern | null = null;
+  if (input.file && fresh) {
+    intern = spawn(
+      `File this into the knowledge wiki and link it to what already exists.\n\nTITLE: ${input.title}\n\n${input.body}${
+        input.url ? `\n\nSOURCE: ${input.url}` : ""
+      }`,
+      { role: "archivist" },
+    );
+  }
+
+  return { fact, fresh, merged, intern };
+}
+
+// ---------------------------------------------------------------------------
 // One-shot ask (not an intern — a direct question to the brain)
 // ---------------------------------------------------------------------------
 
@@ -495,20 +909,30 @@ export async function ask(question: string): Promise<void> {
   await probe();
 
   if (!store.system.reachable) {
-    const g = store.graph;
-    const q = question.toLowerCase();
-    const hits = g.nodes
+    // Facts first: they are the citable layer, and unlike graph nodes they
+    // carry provenance, so the answer can say where it came from.
+    const facts = brain.recall(question, { limit: 5 });
+    const first = question.toLowerCase().split(/\s+/)[0] ?? "";
+    const hits = store.graph.nodes
       .filter(
         (n) =>
-          n.label.toLowerCase().includes(q.split(/\s+/)[0] ?? "") ||
-          q.includes(n.label.toLowerCase().split(/\s+/)[0] ?? " "),
+          n.kind !== "fact" &&
+          first.length > 1 &&
+          n.label.toLowerCase().includes(first),
       )
       .slice(0, 6);
+
     log(null, "warn", "SIM · answering from the local brain index only");
-    if (hits.length) {
-      for (const h of hits) log(null, "out", `${h.kind.padEnd(9)} ${h.label}`);
-    } else {
-      log(null, "out", "no matching nodes. spawn an intern to go find out.");
+    for (const f of facts) {
+      log(
+        null,
+        "out",
+        `${f.kind.padEnd(11)} ${f.title}  [${f.id} · ${f.observations.length} obs · ${Math.round(f.confidence * 100)}%]`,
+      );
+    }
+    for (const h of hits) log(null, "out", `${h.kind.padEnd(11)} ${h.label}`);
+    if (!facts.length && !hits.length) {
+      log(null, "out", "nothing on that yet. spawn an intern, or capture what you know.");
     }
     return;
   }
@@ -549,7 +973,7 @@ export async function ask(question: string): Promise<void> {
 // leaves the building without a person saying yes.
 // ---------------------------------------------------------------------------
 
-let actionCounter = 0;
+let actionCounter = store.outbox.size;
 
 export function listActions(status?: ActionStatus): ProposedAction[] {
   const all = [...store.outbox.values()].sort((a, b) => b.createdAt - a.createdAt);
@@ -560,6 +984,7 @@ export const getAction = (id: string) => store.outbox.get(id) ?? null;
 
 export function proposeAction(input: {
   internId: string | null;
+  role?: RoleId;
   kind: ActionKind;
   title: string;
   draft: Draft;
@@ -569,9 +994,14 @@ export function proposeAction(input: {
   const id = `act-${(++actionCounter).toString(36).padStart(2, "0")}${Math.random()
     .toString(36)
     .slice(2, 4)}`;
+  const role =
+    input.role ??
+    (input.internId ? store.interns.get(input.internId)?.role : undefined) ??
+    DEFAULT_ROLE;
   const action: ProposedAction = {
     id,
     internId: input.internId,
+    role,
     kind: input.kind,
     status: "pending",
     title: input.title,
@@ -587,6 +1017,14 @@ export function proposeAction(input: {
     "warn",
     `proposed ${input.kind} · "${input.draft.subject}" → ${input.draft.to.join(", ")} · awaiting approval (${id})`,
   );
+  brain.note({
+    kind: "handover",
+    actor: "system",
+    internId: input.internId,
+    sourceId: null,
+    ref: id,
+    detail: `${role} proposed ${input.kind}: ${input.draft.subject}`,
+  });
 
   const nodes: GraphNode[] = [
     {
@@ -602,17 +1040,34 @@ export function proposeAction(input: {
     edges.push({ source: input.internId, target: id, rel: "drafted" });
   }
   graft(nodes, edges);
+
+  // A graduated role has already been judged on this kind of work often enough
+  // that a person said to stop reviewing it. Honouring that is the whole point
+  // of graduation — but it happens loudly, in the same stream as everything
+  // else, so nobody discovers it after the fact.
+  if (trust.isGraduated(role)) {
+    log(input.internId, "sys", `${role} is graduated · ${id} goes without review`);
+    void approveAndSend(id, "graduated");
+  }
   return action;
 }
 
 function settle(action: ProposedAction, detail: string) {
   store.outbox.set(action.id, action);
   emit({ type: "action", action });
+  brain.note({
+    kind: "decision",
+    actor: action.decidedVia === "graduated" ? "system" : "you",
+    internId: action.internId,
+    sourceId: null,
+    ref: action.id,
+    detail,
+  });
   graft(
     [
       {
         id: action.id,
-        label: `✉ ${action.draft.subject}`.slice(0, 60),
+        label: `✉ ${outgoing(action).subject}`.slice(0, 60),
         kind: "action",
         weight: 4,
         detail,
@@ -622,37 +1077,190 @@ function settle(action: ProposedAction, detail: string) {
   );
 }
 
+const FIELDS: (keyof Draft)[] = ["to", "cc", "subject", "body", "startsAt", "endsAt"];
+
+const render = (v: Draft[keyof Draft]): string =>
+  Array.isArray(v) ? v.join(", ") : (v ?? "");
+
+/** Which fields the person actually rewrote. Whitespace-only changes don't count. */
+function changedFields(proposed: Draft, accepted: Draft): (keyof Draft)[] {
+  return FIELDS.filter(
+    (f) => render(proposed[f]).trim() !== render(accepted[f]).trim(),
+  );
+}
+
+export type Decision = "voice" | "cockpit" | "graduated";
+
+/**
+ * Approve a draft, optionally rewriting it first.
+ *
+ * The edited version is stored beside the original, never over it. That pair —
+ * what the intern wrote, what the person was willing to send — is the only
+ * honest signal the system gets about how good the work actually was, and it
+ * is the reason the next draft is better. Collapsing them into one field would
+ * make the outbox tidier and the product pointless.
+ */
 export function approveAction(
   id: string,
-  via: "voice" | "cockpit",
+  via: Decision,
+  edits?: Partial<Draft>,
 ): ProposedAction | null {
   const action = store.outbox.get(id);
   if (!action || action.status !== "pending") return null;
+
+  const accepted: Draft = { ...action.draft, ...edits };
+  const edited = edits ? changedFields(action.draft, accepted) : [];
+
   action.status = "approved";
   action.decidedAt = Date.now();
   action.decidedVia = via;
-  settle(action, `approved via ${via}`);
-  log(action.internId, "ok", `${id} approved via ${via} · handed to the executor`);
+  if (edited.length) {
+    action.accepted = accepted;
+    action.editedFields = edited;
+  }
+
+  settle(action, edited.length ? `approved with edits via ${via}` : `approved via ${via}`);
+  log(
+    action.internId,
+    "ok",
+    edited.length
+      ? `${id} approved via ${via} with edits to ${edited.join(", ")}`
+      : `${id} approved via ${via} · handed to the executor`,
+  );
+
+  // Graduated work is not supervised, so it is not evidence about supervision.
+  // Counting it would let a role's rate drift up on decisions nobody made.
+  if (via !== "graduated") {
+    recordDecision(action, edited.length ? "edited" : "unedited");
+  }
+  if (edited.length) learnFromEdit(action, accepted, edited);
+
   return action;
 }
 
+/**
+ * "Not like this." The task halts and the reason is filed as a correction, so
+ * the next intern on this kind of work reads it before it starts.
+ */
 export function rejectAction(
   id: string,
   reason: string,
-  via: "voice" | "cockpit",
+  via: Decision,
 ): ProposedAction | null {
   const action = store.outbox.get(id);
   if (!action || (action.status !== "pending" && action.status !== "approved")) {
     return null;
   }
+  // Rejecting work that went out unsupervised is the single most important
+  // signal there is, and it never passes through `pending` — graduation
+  // approves it on arrival. Counting only pending rejections would make
+  // graduation permanent in practice, whatever the revocation rule said.
+  const unreviewed =
+    action.status === "pending" || action.decidedVia === "graduated";
+
   action.status = "rejected";
   action.decidedAt = Date.now();
   action.decidedVia = via;
   action.result = reason;
   settle(action, `rejected · ${reason}`.slice(0, 60));
   log(action.internId, "warn", `${id} rejected via ${via}${reason ? ` · ${reason}` : ""}`);
+
+  if (unreviewed) recordDecision(action, "rejected");
+
+  const fact = brain.learn({
+    kind: "correction",
+    title: `do not send: ${action.draft.subject}`,
+    body: `A ${action.role} drafted a ${action.kind} to ${action.draft.to.join(", ")} and a person rejected it.\n\nReason given: ${reason}\n\nWhat was drafted:\n${action.draft.body}`,
+    subject: action.role,
+    tags: ["rejected", action.kind],
+    internId: action.internId,
+  });
+  log(action.internId, "sys", `filed the reason as ${fact.id} · the next ${action.role} reads it first`);
+  emit({ type: "brain", brain: brain.stats() });
   return action;
 }
+
+/** Fold the decision into the role's record, and say so if a line was crossed. */
+function recordDecision(
+  action: ProposedAction,
+  outcome: "unedited" | "edited" | "rejected",
+) {
+  const { trust: record, proposed, revoked } = trust.record(
+    action.role,
+    action.id,
+    outcome,
+  );
+  emit({ type: "trust", trust: trust.all() });
+
+  if (revoked) {
+    log(null, "warn", `${action.role} un-graduated · back to supervised on every draft`);
+  }
+  if (proposed) {
+    log(
+      null,
+      "ok",
+      `${action.role} is ready to graduate · ${Math.round(record.rate * 100)}% accepted unedited over ${record.decisions} · run "graduate ${action.role}" to confirm`,
+    );
+  }
+}
+
+/**
+ * Turn one edit into a preference the next brief will carry.
+ *
+ * The before and after are both kept in full. A summary of what changed would
+ * be smaller and would lose the thing that matters — how the person actually
+ * writes, as opposed to how they'd describe the way they write.
+ */
+function learnFromEdit(
+  action: ProposedAction,
+  accepted: Draft,
+  edited: (keyof Draft)[],
+) {
+  const fact = brain.learn({
+    kind: "preference",
+    title: `${action.role}: ${edited.join(" and ")} rewritten before sending`,
+    body: [
+      `A ${action.role} drafted a ${action.kind}; a person rewrote it before approving.`,
+      "",
+      ...edited.flatMap((field) => [
+        `${String(field).toUpperCase()} — proposed:`,
+        render(action.draft[field]),
+        `${String(field).toUpperCase()} — accepted:`,
+        render(accepted[field]),
+        "",
+      ]),
+      "Write it the accepted way next time.",
+    ].join("\n"),
+    subject: action.role,
+    tags: ["voice", action.kind],
+    internId: action.internId,
+  });
+  log(
+    action.internId,
+    "sys",
+    `learned ${fact.id} from your edit · every ${action.role} from now on starts with it`,
+  );
+  emit({ type: "brain", brain: brain.stats() });
+}
+
+// ---------------------------------------------------------------------------
+// Graduation
+// ---------------------------------------------------------------------------
+
+export function graduateRole(role: RoleId, confirmed: boolean) {
+  const record = trust.graduate(role, confirmed);
+  emit({ type: "trust", trust: trust.all() });
+  log(
+    null,
+    confirmed ? "ok" : "sys",
+    confirmed
+      ? `${role} graduated · its drafts now go without review, and one rejection takes it back`
+      : `${role} stays supervised`,
+  );
+  return record;
+}
+
+export const trustRecords = () => trust.all();
 
 /** The executor (VoiceOS) tells us what actually happened. */
 export function recordActionResult(
@@ -672,6 +1280,23 @@ export function recordActionResult(
     status === "sent" ? "ok" : "err",
     `${id} ${status}${detail ? ` · ${detail}` : ""}`,
   );
+
+  // What actually left the building is itself something the company now knows.
+  // Without this the brain would have no record that the email exists, and the
+  // next intern would happily draft it again.
+  if (status === "sent") {
+    const sent = outgoing(action);
+    const { observation } = brain.record({
+      sourceId: `sent:${action.kind}`,
+      externalId: action.id,
+      actor: "you",
+      title: `${action.kind} sent to ${sent.to.join(", ")}: ${sent.subject}`,
+      body: sent.body,
+      hint: { kind: "note", tags: ["sent", action.kind] },
+    });
+    brain.promote(observation, { kind: "note", tags: ["sent", action.kind] });
+    setBase(store.base);
+  }
   return action;
 }
 
@@ -684,7 +1309,7 @@ export function recordActionResult(
  */
 export function parseProposedAction(
   report: string,
-  internId: string,
+  intern: Intern,
 ): ProposedAction | null {
   const match = report.match(/```action\s*([\s\S]*?)```/);
   if (!match) return null;
@@ -703,7 +1328,8 @@ export function parseProposedAction(
     const kind: ActionKind =
       raw.kind === "slack" || raw.kind === "calendar" ? raw.kind : "email";
     return proposeAction({
-      internId,
+      internId: intern.id,
+      role: intern.role,
       kind,
       title: `${kind} to ${to.join(", ")} — ${raw.subject}`,
       draft: {
@@ -716,7 +1342,52 @@ export function parseProposedAction(
       sources: raw.sources ?? [],
     });
   } catch {
-    log(internId, "warn", "final report had an action block that wasn't valid JSON");
+    log(intern.id, "warn", "final report had an action block that wasn't valid JSON");
     return null;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Execution
+//
+// The only path from an approved draft to something actually leaving. Splitting
+// approve from execute keeps the gate honest: approveAction records a human
+// decision, executeAction acts on it, and neither can happen out of order.
+// ---------------------------------------------------------------------------
+
+export async function executeAction(id: string): Promise<ProposedAction | null> {
+  const action = store.outbox.get(id);
+  if (!action || action.status !== "approved") return null;
+
+  const connector = connectorFor(action.kind);
+  if (!connector) {
+    log(
+      action.internId,
+      "warn",
+      `${id} approved but no ${action.kind} connector is configured — waiting for an external sender`,
+    );
+    return action;
+  }
+
+  log(action.internId, "tool", `${connector.id}.send(${id})${DRY_RUN ? " · DRY RUN" : ""}`);
+  const result = await execute(action);
+  return recordActionResult(id, result.ok ? "sent" : "failed", result.detail);
+}
+
+/** Approve and, if we hold the credentials, send it ourselves. */
+export async function approveAndSend(
+  id: string,
+  via: Decision,
+  edits?: Partial<Draft>,
+): Promise<{ action: ProposedAction | null; dispatched: boolean }> {
+  const approved = approveAction(id, via, edits);
+  if (!approved) return { action: null, dispatched: false };
+
+  const connector = connectorFor(approved.kind);
+  if (!connector) return { action: approved, dispatched: false };
+
+  const settled = await executeAction(id);
+  return { action: settled ?? approved, dispatched: true };
+}
+
+export { connectorStatus };

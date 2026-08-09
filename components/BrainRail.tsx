@@ -1,10 +1,24 @@
 "use client";
 
 import { KIND_COLOR, KIND_ORDER } from "./BrainGraph";
-import type { Graph, GraphNode, NodeKind, SystemState } from "@/lib/types";
+import Roster from "./Roster";
+import type {
+  BrainStats,
+  ConnectorsState,
+  Graph,
+  GraphNode,
+  NodeKind,
+  RoleId,
+  SystemState,
+  TrustRecord,
+} from "@/lib/types";
 
 export default function BrainRail({
   system,
+  connectors,
+  trust,
+  brain,
+  onGraduate,
   graph,
   hidden,
   onToggleKind,
@@ -14,6 +28,10 @@ export default function BrainRail({
   refreshing,
 }: {
   system: SystemState;
+  connectors: ConnectorsState | null;
+  trust: TrustRecord[];
+  brain: BrainStats | null;
+  onGraduate: (role: RoleId, confirmed: boolean) => void;
   graph: Graph;
   hidden: Set<NodeKind>;
   onToggleKind: (k: NodeKind) => void;
@@ -91,6 +109,45 @@ export default function BrainRail({
             </div>
           ))
         )}
+      </Section>
+
+      <Section title="senders">
+        {!connectors ? (
+          <p className="text-faint">checking…</p>
+        ) : (
+          <>
+            {connectors.connectors.map((c) => (
+              <div key={c.kind} className="flex items-center gap-2 py-0.5">
+                <span
+                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                    c.configured ? "bg-ok" : "bg-line-2"
+                  }`}
+                />
+                <span className="text-dim">{c.kind}</span>
+                <span
+                  className="ml-auto min-w-0 truncate text-faint"
+                  title={
+                    c.configured
+                      ? c.label
+                      : `set ${c.missing.join(", ")} to enable`
+                  }
+                >
+                  {c.configured ? (c.id ?? "") : "—"}
+                </span>
+              </div>
+            ))}
+            {connectors.dryRun ? (
+              <p className="mt-1.5 border-l border-warn/40 pl-2 text-warn">
+                dry run · approvals go through the whole path but nothing
+                actually leaves
+              </p>
+            ) : null}
+          </>
+        )}
+      </Section>
+
+      <Section title="roster">
+        <Roster trust={trust} brain={brain} onGraduate={onGraduate} />
       </Section>
 
       <Section title="layers">

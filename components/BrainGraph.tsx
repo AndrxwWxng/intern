@@ -13,6 +13,8 @@ export const KIND_COLOR: Record<NodeKind, string> = {
   tag: "#565c65",
   intern: "#f2f4f6",
   action: "#e8788a",
+  fact: "#e3c877",
+  question: "#ff8ad8",
 };
 
 export const KIND_ORDER: NodeKind[] = [
@@ -25,6 +27,8 @@ export const KIND_ORDER: NodeKind[] = [
   "tag",
   "intern",
   "action",
+  "fact",
+  "question",
 ];
 
 type Body = {

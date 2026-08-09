@@ -7,18 +7,24 @@ import BrainGraph from "./BrainGraph";
 import BrainRail from "./BrainRail";
 import CommandBar, { HELP } from "./CommandBar";
 import InternRail from "./InternRail";
-import Outbox from "./Outbox";
+import Outbox, { type Decision } from "./Outbox";
+import Questions from "./Questions";
 import Terminal from "./Terminal";
 import type {
+  BrainStats,
   CockpitEvent,
   Graph,
   GraphNode,
   Intern,
   LogLevel,
   LogLine,
+  ConnectorsState,
   NodeKind,
   ProposedAction,
+  Question,
+  RoleId,
   SystemState,
+  TrustRecord,
 } from "@/lib/types";
 
 const EMPTY_GRAPH: Graph = {
@@ -40,13 +46,14 @@ const EMPTY_SYSTEM: SystemState = {
 export default function Cockpit() {
   const [interns, setInterns] = useState<Intern[]>([]);
   const [log, setLog] = useState<LogLine[]>([]);
-  // Scout/SIM feed these over SSE; Convex is merged on top below.
   const [streamGraph, setStreamGraph] = useState<Graph>(EMPTY_GRAPH);
   const [system, setSystem] = useState<SystemState>(EMPTY_SYSTEM);
   const [streamOutbox, setStreamOutbox] = useState<ProposedAction[]>([]);
+  const [questions, setQuestions] = useState<Question[]>([]);
+  const [trust, setTrust] = useState<TrustRecord[]>([]);
+  const [brain, setBrain] = useState<BrainStats | null>(null);
+  const [connectors, setConnectors] = useState<ConnectorsState | null>(null);
   const [connected, setConnected] = useState(false);
-
-  // Live from Convex. Undefined until the first result lands.
   const convexGraph = useQuery(api.brain.graph, {});
   const convexOutbox = useQuery(api.outbox.list, {});
 
@@ -89,7 +96,22 @@ export default function Cockpit() {
           setLog(e.log);
           setSystem(e.system);
           setStreamOutbox(e.outbox);
+          setQuestions(e.questions);
+          setTrust(e.trust);
+          setBrain(e.brain);
           setConnected(true);
+          break;
+        case "question":
+          setQuestions((prev) => {
+            const rest = prev.filter((q) => q.id !== e.question.id);
+            return [e.question, ...rest].sort((a, b) => b.askedAt - a.askedAt);
+          });
+          break;
+        case "trust":
+          setTrust(e.trust);
+          break;
+        case "brain":
+          setBrain(e.brain);
           break;
         case "action":
           setStreamOutbox((prev) => {
@@ -120,10 +142,17 @@ export default function Cockpit() {
     return () => es.close();
   }, []);
 
-  // --- Convex merged over the stream --------------------------------------
-  // Scout (or SIM) supplies the bulk of the graph; Convex supplies whatever
-  // has been filed durably. Convex wins on collision, because it is the thing
-  // that survives a restart and the thing every other browser is also seeing.
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/connectors")
+      .then((r) => r.json())
+      .then((d: ConnectorsState) => alive && setConnectors(d))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   const graph = useMemo<Graph>(() => {
     if (!convexGraph?.nodes.length) return streamGraph;
 
@@ -139,7 +168,9 @@ export default function Cockpit() {
       });
     }
 
-    const seen = new Set(streamGraph.edges.map((e) => `${e.source}|${e.target}|${e.rel ?? ""}`));
+    const seen = new Set(
+      streamGraph.edges.map((e) => `${e.source}|${e.target}|${e.rel ?? ""}`),
+    );
     const edges = [...streamGraph.edges];
     for (const e of convexGraph.edges) {
       const key = `${e.source}|${e.target}|${e.rel ?? ""}`;
@@ -148,7 +179,12 @@ export default function Cockpit() {
       edges.push({ source: e.source, target: e.target, rel: e.rel ?? undefined });
     }
 
-    return { ...streamGraph, nodes: [...nodes.values()], edges, generatedAt: Date.now() };
+    return {
+      ...streamGraph,
+      nodes: [...nodes.values()],
+      edges,
+      generatedAt: Math.max(streamGraph.generatedAt, convexGraph.generatedAt),
+    };
   }, [streamGraph, convexGraph]);
 
   const outbox = useMemo<ProposedAction[]>(() => {
@@ -187,11 +223,11 @@ export default function Cockpit() {
 
   // --- actions ------------------------------------------------------------
   const spawn = useCallback(
-    async (task: string) => {
+    async (task: string, role?: RoleId) => {
       const res = await fetch("/api/interns", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ task }),
+        body: JSON.stringify({ task, role }),
       });
       if (!res.ok) echo("err", `spawn failed: ${res.status}`);
     },
@@ -207,13 +243,73 @@ export default function Cockpit() {
   );
 
   const decide = useCallback(
-    async (id: string, decision: "approve" | "reject") => {
+    async (id: string, decision: Decision) => {
       const res = await fetch(`/api/outbox/${id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ decision }),
+        body: JSON.stringify(decision),
       });
-      if (!res.ok) echo("err", `could not ${decision} ${id}`);
+      if (!res.ok) {
+        echo("err", `could not ${decision.decision} ${id}`);
+        return;
+      }
+      const data = (await res.json()) as { dispatched?: boolean };
+      if (decision.decision === "approve" && !data.dispatched) {
+        echo("warn", `${id} approved — no connector wired, waiting on an external sender`);
+      }
+    },
+    [echo],
+  );
+
+  const answer = useCallback(
+    async (id: string, text: string) => {
+      const res = await fetch(`/api/questions/${id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ answer: text }),
+      });
+      if (!res.ok) echo("err", `could not answer ${id}`);
+    },
+    [echo],
+  );
+
+  const dismiss = useCallback(
+    async (id: string) => {
+      const res = await fetch(`/api/questions/${id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dismiss: true }),
+      });
+      if (!res.ok) echo("err", `could not drop ${id}`);
+    },
+    [echo],
+  );
+
+  const graduate = useCallback(
+    async (role: RoleId, confirmed: boolean) => {
+      const res = await fetch("/api/roster", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role, confirmed }),
+      });
+      if (!res.ok) echo("err", `could not change ${role}`);
+    },
+    [echo],
+  );
+
+  const captureText = useCallback(
+    async (text: string) => {
+      const [head, ...rest] = text.split(/\n|(?<=[.!?])\s+/);
+      const res = await fetch("/api/capture", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source: "cockpit",
+          title: head.slice(0, 120),
+          body: rest.join(" ").trim() || text,
+        }),
+      });
+      if (!res.ok) echo("err", "capture failed");
     },
     [echo],
   );
@@ -285,21 +381,92 @@ export default function Cockpit() {
         }
         case "approve":
           if (!arg) return echo("err", "usage: approve <action-id>");
-          void decide(arg, "approve");
+          // Approving from the command bar sends the draft as written — the
+          // rail is where you edit before saying yes.
+          void decide(arg, { decision: "approve" });
           return;
-        case "reject":
-          if (!arg) return echo("err", "usage: reject <action-id>");
-          void decide(arg, "reject");
+        case "reject": {
+          const [target, ...why] = arg.split(/\s+/);
+          if (!target) return echo("err", "usage: reject <action-id> [reason]");
+          void decide(target, {
+            decision: "reject",
+            reason: why.join(" ") || "rejected from the command bar",
+          });
           return;
-        case "spawn":
-          if (!arg) return echo("err", "usage: spawn <task>");
+        }
+        case "asks": {
+          const open = questions.filter((q) => q.status === "open");
+          if (!open.length) return echo("out", "nothing parked");
+          for (const q of open) {
+            echo("out", `${q.id}  ${q.internId ?? "—"}  ${q.question}`);
+          }
+          return;
+        }
+        case "answer": {
+          const [target, ...text] = arg.split(/\s+/);
+          if (!target || !text.length) {
+            return echo("err", "usage: answer <ask-id> <your answer>");
+          }
+          void answer(target, text.join(" "));
+          return;
+        }
+        case "capture":
+          if (!arg) return echo("err", "usage: capture <what you know>");
+          void captureText(arg);
+          return;
+        case "roster":
+          for (const t of trust) {
+            echo(
+              "out",
+              `${t.role.padEnd(15)} ${
+                t.decisions
+                  ? `${Math.round(t.rate * 100)}% unedited over ${t.decisions}`
+                  : "no decisions yet"
+              }${t.graduated ? " · unsupervised" : ""}${
+                t.proposed ? " · ready to graduate" : ""
+              }`,
+            );
+          }
+          return;
+        case "graduate":
+        case "supervise": {
+          const role = arg.trim() as RoleId;
+          if (!trust.some((t) => t.role === role)) {
+            return echo(
+              "err",
+              `usage: ${verb.toLowerCase()} <${trust.map((t) => t.role).join("|")}>`,
+            );
+          }
+          void graduate(role, verb.toLowerCase() === "graduate");
+          return;
+        }
+        case "spawn": {
+          if (!arg) return echo("err", "usage: spawn [as <role>] <task>");
+          const as = arg.match(/^as\s+(\S+)\s+([\s\S]+)$/);
+          if (as && trust.some((t) => t.role === as[1])) {
+            void spawn(as[2], as[1] as RoleId);
+            return;
+          }
           void spawn(arg);
           return;
+        }
         default:
           void spawn(raw);
       }
     },
-    [decide, echo, kill, outbox, refresh, spawn],
+    [
+      answer,
+      captureText,
+      decide,
+      echo,
+      graduate,
+      kill,
+      outbox,
+      questions,
+      refresh,
+      spawn,
+      trust,
+    ],
   );
 
   const toggleKind = (k: NodeKind) =>
@@ -345,6 +512,10 @@ export default function Cockpit() {
       <div className="flex min-h-0 flex-1">
         <BrainRail
           system={system}
+          connectors={connectors}
+          trust={trust}
+          brain={brain}
+          onGraduate={graduate}
           graph={graph}
           hidden={hidden}
           onToggleKind={toggleKind}
@@ -417,7 +588,12 @@ export default function Cockpit() {
         </main>
 
         <aside className="flex min-h-0 w-[268px] shrink-0 flex-col border-l border-line">
-          <Outbox actions={outbox} onDecide={decide} />
+          <Questions
+            questions={questions}
+            onAnswer={answer}
+            onDismiss={dismiss}
+          />
+          <Outbox actions={outbox} connectors={connectors} onDecide={decide} />
           <InternRail
             interns={interns}
             filter={filter}

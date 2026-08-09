@@ -28,6 +28,9 @@ export async function GET(request: Request) {
         log: snap.log,
         system: snap.system,
         outbox: snap.outbox,
+        questions: snap.questions,
+        trust: snap.trust,
+        brain: snap.brain,
       });
       send({ type: "graph", graph: snap.graph });
 

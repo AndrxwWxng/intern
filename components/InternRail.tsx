@@ -7,6 +7,11 @@ const STATUS: Record<InternStatus, { dot: string; text: string; label: string }>
   {
     queued: { dot: "bg-warn", text: "text-warn", label: "queued" },
     running: { dot: "bg-ok pulse-slow", text: "text-ok", label: "running" },
+    waiting: {
+      dot: "bg-k-question pulse-slow",
+      text: "text-k-question",
+      label: "waiting on you",
+    },
     done: { dot: "bg-line-2", text: "text-dim", label: "done" },
     failed: { dot: "bg-err", text: "text-err", label: "failed" },
     cancelled: { dot: "bg-faint", text: "text-faint", label: "cancelled" },
@@ -130,9 +135,16 @@ export default function InternRail({
               ) : null}
 
               <div className="mt-1.5 flex items-center gap-2 text-faint">
+                <span>{i.role}</span>
+                <span>·</span>
                 <span>{i.mode === "live" ? "live" : "sim"}</span>
                 <span>·</span>
                 <span>{i.toolCalls} calls</span>
+                {i.resumes ? (
+                  <span className="ml-auto" title={`picked up from ${i.resumes}`}>
+                    ↻ {i.resumes}
+                  </span>
+                ) : null}
               </div>
             </article>
           );
