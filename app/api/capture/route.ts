@@ -1,3 +1,4 @@
+import { requireViewer } from "@/lib/auth";
 import { capture } from "@/lib/store";
 import type { FactKind } from "@/lib/types";
 
@@ -20,6 +21,11 @@ const KINDS: FactKind[] = [
  * fires twice produces one observation and one fact.
  */
 export async function POST(request: Request) {
+  // The fact lands in the shared brain either way; the archivist that `file`
+  // dispatches is an intern, and an intern needs an owner.
+  const who = await requireViewer(request);
+  if (who instanceof Response) return who;
+
   let body: {
     title?: string;
     body?: string;
@@ -58,6 +64,7 @@ export async function POST(request: Request) {
       ? (body.kind as FactKind)
       : undefined,
     file: body.file === true,
+    ownerId: who.userId,
   });
 
   return Response.json(

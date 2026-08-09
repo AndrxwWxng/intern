@@ -187,6 +187,8 @@ export type QuestionStatus = "open" | "answered" | "dismissed";
 export type Question = {
   id: string;
   internId: string | null;
+  /** Whose intern got stuck — the question goes back to them, not the room. */
+  ownerId: string | null;
   question: string;
   /** What the intern was doing when it got stuck. */
   context: string;
@@ -218,6 +220,12 @@ export type Artifact = {
 
 export type Intern = {
   id: string;
+  /**
+   * The Convex user id of whoever dispatched it. An intern works one person's
+   * inbox with one person's credentials, so it is theirs alone to see and to
+   * stop — there is no ownerless intern.
+   */
+  ownerId: string;
   /** Short handle shown in the UI, e.g. `int-7f2`. */
   handle: string;
   task: string;
@@ -277,6 +285,8 @@ export type Draft = {
 export type ProposedAction = {
   id: string;
   internId: string | null;
+  /** Whose intern proposed it — only they see it, only they decide it. */
+  ownerId: string | null;
   /** What surface it goes out on. Trust is tracked against this. */
   kind: ActionKind;
   status: ActionStatus;
@@ -328,6 +338,12 @@ export type LogLine = {
   id: number;
   /** null for cockpit-level lines that aren't owned by an intern. */
   internId: string | null;
+  /**
+   * Whose terminal this line belongs in. Inherited from the intern that wrote
+   * it; null means a system line — "scout unreachable", "brain replayed" —
+   * which is about the deployment, not about anybody's work.
+   */
+  ownerId: string | null;
   ts: number;
   level: LogLevel;
   text: string;

@@ -17,6 +17,7 @@ import type * as log from "../log.js";
 import type * as outbox from "../outbox.js";
 import type * as providers from "../providers.js";
 import type * as tokens from "../tokens.js";
+import type * as users from "../users.js";
 
 import type {
   ApiFromModules,
@@ -34,6 +35,7 @@ declare const fullApi: ApiFromModules<{
   outbox: typeof outbox;
   providers: typeof providers;
   tokens: typeof tokens;
+  users: typeof users;
 }>;
 
 /**

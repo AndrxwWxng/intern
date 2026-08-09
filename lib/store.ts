@@ -48,6 +48,13 @@ const MAX_CONCURRENT = 4;
 
 type Subscriber = (e: CockpitEvent) => void;
 
+/**
+ * One open cockpit stream. The bus is process-wide and every signed-in person
+ * shares it, so each listener carries the owner it is allowed to hear about —
+ * filtering at the fan-out is what keeps one process from being one audience.
+ */
+type Listener = { fn: Subscriber; ownerId: string };
+
 type Store = {
   interns: Map<string, Intern>;
   controllers: Map<string, AbortController>;
@@ -61,7 +68,7 @@ type Store = {
   questions: Map<string, Question>;
   /** The last graph read from Scout or seeded, before our facts are grafted on. */
   base: Graph;
-  subs: Set<Subscriber>;
+  subs: Set<Listener>;
   probing: Promise<void> | null;
   lastProbe: number;
 };
@@ -109,25 +116,108 @@ globalThis.__internCockpit = store;
 // Bus
 // ---------------------------------------------------------------------------
 
-export function subscribe(fn: Subscriber): () => void {
-  store.subs.add(fn);
-  return () => store.subs.delete(fn);
+export function subscribe(fn: Subscriber, ownerId: string): () => void {
+  const listener: Listener = { fn, ownerId };
+  store.subs.add(listener);
+  return () => store.subs.delete(listener);
+}
+
+/**
+ * Whose event this is, or null for the ones that belong to the deployment
+ * rather than to a person — the graph, scout's reachability, trust levels,
+ * brain stats. Anything derived from an intern carries that intern's owner.
+ */
+function ownerOf(e: CockpitEvent): string | null {
+  switch (e.type) {
+    case "intern":
+      return e.intern.ownerId;
+    case "log":
+      return e.line.ownerId;
+    case "action":
+      return e.action.ownerId;
+    case "question":
+      return e.question.ownerId;
+    default:
+      return null;
+  }
+}
+
+/**
+ * The shared graph as one person may see it.
+ *
+ * Interns, the questions they park on and the drafts they propose are all
+ * grafted in as nodes carrying their own text, so the graph — otherwise
+ * deliberately shared — is where someone else's brief would show through.
+ * Those three kinds are dropped unless they're the viewer's. Everything the
+ * intern *learned* stays: facts, contacts, projects and wiki pages are the
+ * company brain, and the whole point is that it is one brain.
+ */
+export function visibleGraph(graph: Graph, ownerId: string): Graph {
+  const mine = (id: string, kind: GraphNode["kind"]) => {
+    switch (kind) {
+      case "intern":
+        return store.interns.get(id)?.ownerId === ownerId;
+      case "question":
+        return store.questions.get(id)?.ownerId === ownerId;
+      case "action":
+        return store.outbox.get(id)?.ownerId === ownerId;
+      default:
+        return true;
+    }
+  };
+
+  const hidden = new Set(
+    graph.nodes.filter((n) => !mine(n.id, n.kind)).map((n) => n.id),
+  );
+  if (!hidden.size) return graph;
+
+  return {
+    ...graph,
+    nodes: graph.nodes.filter((n) => !hidden.has(n.id)),
+    edges: graph.edges.filter(
+      (e) => !hidden.has(e.source) && !hidden.has(e.target),
+    ),
+  };
 }
 
 function emit(e: CockpitEvent) {
-  for (const fn of store.subs) {
+  const owner = ownerOf(e);
+  for (const listener of store.subs) {
+    if (owner !== null && listener.ownerId !== owner) continue;
     try {
-      fn(e);
+      // The graph is shared but not identical: each listener gets its own
+      // interns grafted in and nobody else's.
+      listener.fn(
+        e.type === "graph"
+          ? { type: "graph", graph: visibleGraph(e.graph, listener.ownerId) }
+          : e,
+      );
     } catch {
       /* a dead subscriber must not take down the run */
     }
   }
 }
 
-export function log(internId: string | null, level: LogLevel, text: string) {
+/** The owner a line inherits: the intern's, or nobody's for system lines. */
+const ownerOfIntern = (internId: string | null) =>
+  internId ? (store.interns.get(internId)?.ownerId ?? null) : null;
+
+/**
+ * `owner` is only needed for lines that belong to a person but not to an
+ * intern — the cockpit's own `ask` output, which is one person's answer to one
+ * person's question. Everything else inherits from the intern, and a line with
+ * neither is a system line the whole deployment can see.
+ */
+export function log(
+  internId: string | null,
+  level: LogLevel,
+  text: string,
+  owner?: string | null,
+) {
   const line: LogLine = {
     id: ++store.logSeq,
     internId,
+    ownerId: owner !== undefined ? owner : ownerOfIntern(internId),
     ts: Date.now(),
     level,
     text,
@@ -146,13 +236,24 @@ function touch(intern: Intern) {
 // Snapshot accessors
 // ---------------------------------------------------------------------------
 
-export const snapshot = () => ({
-  interns: [...store.interns.values()].sort((a, b) => b.createdAt - a.createdAt),
-  log: store.log.slice(-400),
+/**
+ * What one person's cockpit opens with.
+ *
+ * Interns, their log lines, their drafts and their questions are filtered to
+ * the owner; the graph, system state, trust and brain stats are the shared
+ * company brain and are the same for everybody by design.
+ */
+export const snapshot = (ownerId: string) => ({
+  interns: [...store.interns.values()]
+    .filter((i) => i.ownerId === ownerId)
+    .sort((a, b) => b.createdAt - a.createdAt),
+  log: store.log
+    .filter((l) => l.ownerId === null || l.ownerId === ownerId)
+    .slice(-400),
   system: store.system,
-  graph: store.graph,
-  outbox: listActions(),
-  questions: listQuestions(),
+  graph: visibleGraph(store.graph, ownerId),
+  outbox: listActions(undefined, ownerId),
+  questions: listQuestions(undefined, ownerId),
   trust: trust.all(),
   brain: brain.stats(),
 });
@@ -305,13 +406,17 @@ export async function refreshGraph(): Promise<Graph> {
 // that already belong to something.
 let counter = store.interns.size;
 
-export function spawn(task: string, opts: { resumes?: string } = {}): Intern {
+export function spawn(
+  task: string,
+  opts: { ownerId: string; resumes?: string },
+): Intern {
   const n = ++counter;
   const id = `int-${n.toString(36).padStart(2, "0")}${Math.random()
     .toString(36)
     .slice(2, 4)}`;
   const intern: Intern = {
     id,
+    ownerId: opts.ownerId,
     handle: id,
     task,
     status: "queued",
@@ -356,9 +461,10 @@ export function spawn(task: string, opts: { resumes?: string } = {}): Intern {
   return intern;
 }
 
-export function cancel(id: string): boolean {
+export function cancel(id: string, ownerId: string): boolean {
   const intern = store.interns.get(id);
-  if (!intern) return false;
+  // Not yours reads the same as not there — you can only stop your own work.
+  if (!intern || intern.ownerId !== ownerId) return false;
   if (intern.status === "done" || intern.status === "failed") return false;
 
   store.controllers.get(id)?.abort();
@@ -700,12 +806,21 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 
 let questionCounter = store.questions.size;
 
-export const listQuestions = (status?: Question["status"]): Question[] => {
-  const all = [...store.questions.values()].sort((a, b) => b.askedAt - a.askedAt);
+export const listQuestions = (
+  status?: Question["status"],
+  ownerId?: string,
+): Question[] => {
+  const all = [...store.questions.values()]
+    .filter((q) => ownerId === undefined || q.ownerId === ownerId)
+    .sort((a, b) => b.askedAt - a.askedAt);
   return status ? all.filter((q) => q.status === status) : all;
 };
 
-export const getQuestion = (id: string) => store.questions.get(id) ?? null;
+export const getQuestion = (id: string, ownerId?: string) => {
+  const row = store.questions.get(id) ?? null;
+  if (row && ownerId !== undefined && row.ownerId !== ownerId) return null;
+  return row;
+};
 
 export function askQuestion(
   intern: Intern,
@@ -718,6 +833,7 @@ export function askQuestion(
   const row: Question = {
     id,
     internId: intern.id,
+    ownerId: intern.ownerId,
     question: question.slice(0, 500),
     context: context.slice(0, 1000),
     status: "open",
@@ -764,13 +880,20 @@ function park(intern: Intern, question: Question) {
  * every future task, not just this one — and only then is the parked work
  * picked back up.
  */
+/**
+ * `ownerId` is the caller asserting whose question this is. Omitted only on
+ * internal paths that have no person behind them; from an API route it is
+ * always passed, and a mismatch reads exactly like a question that isn't open.
+ */
 export function answerQuestion(
   id: string,
   answer: string,
   actor = "you",
+  ownerId?: string,
 ): { question: Question; resumed: Intern | null } | null {
   const question = store.questions.get(id);
   if (!question || question.status !== "open") return null;
+  if (ownerId !== undefined && question.ownerId !== ownerId) return null;
 
   question.status = "answered";
   question.answer = answer.slice(0, 2000);
@@ -820,7 +943,7 @@ export function answerQuestion(
     touch(parked);
     resumed = spawn(
       `${parked.task}\n\nYou asked: ${question.question}\nThe answer is: ${answer}\nCarry on from there.`,
-      { resumes: parked.id },
+      { ownerId: parked.ownerId, resumes: parked.id },
     );
     question.resumedBy = resumed.id;
     graft([], [{ source: id, target: resumed.id, rel: "resumed" }]);
@@ -832,9 +955,10 @@ export function answerQuestion(
 }
 
 /** The question doesn't need answering after all. The work stays stopped. */
-export function dismissQuestion(id: string): Question | null {
+export function dismissQuestion(id: string, ownerId?: string): Question | null {
   const question = store.questions.get(id);
   if (!question || question.status !== "open") return null;
+  if (ownerId !== undefined && question.ownerId !== ownerId) return null;
   question.status = "dismissed";
   question.answeredAt = Date.now();
   const parked = question.internId ? store.interns.get(question.internId) : null;
@@ -892,6 +1016,12 @@ export async function capture(input: {
   kind?: Fact["kind"];
   /** Also put an intern on writing it into the wiki properly. */
   file?: boolean;
+  /**
+   * Whoever captured. The fact itself lands in the shared brain — that is the
+   * point of capturing — but the archivist dispatched to file it is an intern
+   * like any other, and belongs to the person who asked for it.
+   */
+  ownerId: string;
 }): Promise<{ fact: Fact; fresh: boolean; merged: boolean; intern: Intern | null }> {
   await brain.ready();
 
@@ -923,6 +1053,7 @@ export async function capture(input: {
       `File this into the knowledge wiki and link it to what already exists.\n\nTITLE: ${input.title}\n\n${input.body}${
         input.url ? `\n\nSOURCE: ${input.url}` : ""
       }`,
+      { ownerId: input.ownerId },
     );
   }
 
@@ -933,8 +1064,11 @@ export async function capture(input: {
 // One-shot ask (not an intern — a direct question to the brain)
 // ---------------------------------------------------------------------------
 
-export async function ask(question: string): Promise<void> {
-  log(null, "in", `? ${question}`);
+export async function ask(question: string, ownerId: string): Promise<void> {
+  // One person asked; the answer belongs in their terminal and nobody else's.
+  const say = (level: LogLevel, text: string) => log(null, level, text, ownerId);
+
+  say("in", `? ${question}`);
   await probe();
 
   if (!store.system.reachable) {
@@ -951,17 +1085,16 @@ export async function ask(question: string): Promise<void> {
       )
       .slice(0, 6);
 
-    log(null, "warn", "SIM · answering from the local brain index only");
+    say("warn", "SIM · answering from the local brain index only");
     for (const f of facts) {
-      log(
-        null,
+      say(
         "out",
         `${f.kind.padEnd(11)} ${f.title}  [${f.id} · ${f.observations.length} obs · ${Math.round(f.confidence * 100)}%]`,
       );
     }
-    for (const h of hits) log(null, "out", `${h.kind.padEnd(11)} ${h.label}`);
+    for (const h of hits) say("out", `${h.kind.padEnd(11)} ${h.label}`);
     if (!facts.length && !hits.length) {
-      log(null, "out", "nothing on that yet. spawn an intern, or capture what you know.");
+      say("out", "nothing on that yet. spawn an intern, or capture what you know.");
     }
     return;
   }
@@ -985,7 +1118,7 @@ export async function ask(question: string): Promise<void> {
     }
     out.flushAll();
   } catch (err) {
-    log(null, "err", err instanceof Error ? err.message : String(err));
+    say("err", err instanceof Error ? err.message : String(err));
   }
 }
 
@@ -1001,15 +1134,26 @@ export async function ask(question: string): Promise<void> {
 
 let actionCounter = store.outbox.size;
 
-export function listActions(status?: ActionStatus): ProposedAction[] {
-  const all = [...store.outbox.values()].sort((a, b) => b.createdAt - a.createdAt);
+export function listActions(
+  status?: ActionStatus,
+  ownerId?: string,
+): ProposedAction[] {
+  const all = [...store.outbox.values()]
+    .filter((a) => ownerId === undefined || a.ownerId === ownerId)
+    .sort((a, b) => b.createdAt - a.createdAt);
   return status ? all.filter((a) => a.status === status) : all;
 }
 
-export const getAction = (id: string) => store.outbox.get(id) ?? null;
+export const getAction = (id: string, ownerId?: string) => {
+  const row = store.outbox.get(id) ?? null;
+  if (row && ownerId !== undefined && row.ownerId !== ownerId) return null;
+  return row;
+};
 
 export function proposeAction(input: {
   internId: string | null;
+  /** Explicit only for drafts with no intern behind them; otherwise inherited. */
+  ownerId?: string | null;
   kind: ActionKind;
   title: string;
   draft: Draft;
@@ -1022,6 +1166,10 @@ export function proposeAction(input: {
   const action: ProposedAction = {
     id,
     internId: input.internId,
+    ownerId:
+      input.ownerId !== undefined
+        ? input.ownerId
+        : (input.internId ? store.interns.get(input.internId)?.ownerId : null) ?? null,
     kind: input.kind,
     status: "pending",
     title: input.title,
@@ -1124,9 +1272,13 @@ export function approveAction(
   id: string,
   via: Decision,
   edits?: Partial<Draft>,
+  ownerId?: string,
 ): ProposedAction | null {
   const action = store.outbox.get(id);
   if (!action || action.status !== "pending") return null;
+  // Only the person whose intern wrote it can send it — the From header is
+  // theirs, so the yes has to be theirs too.
+  if (ownerId !== undefined && action.ownerId !== ownerId) return null;
 
   const accepted: Draft = { ...action.draft, ...edits };
   const edited = edits ? changedFields(action.draft, accepted) : [];
@@ -1166,11 +1318,13 @@ export function rejectAction(
   id: string,
   reason: string,
   via: Decision,
+  ownerId?: string,
 ): ProposedAction | null {
   const action = store.outbox.get(id);
   if (!action || (action.status !== "pending" && action.status !== "approved")) {
     return null;
   }
+  if (ownerId !== undefined && action.ownerId !== ownerId) return null;
   // Rejecting work that went out unsupervised is the single most important
   // signal there is, and it never passes through `pending` — graduation
   // approves it on arrival. Counting only pending rejections would make
@@ -1378,8 +1532,9 @@ export async function approveAndSend(
   id: string,
   via: Decision,
   edits?: Partial<Draft>,
+  ownerId?: string,
 ): Promise<{ action: ProposedAction | null; dispatched: boolean }> {
-  const approved = approveAction(id, via, edits);
+  const approved = approveAction(id, via, edits, ownerId);
   if (!approved) return { action: null, dispatched: false };
 
   const connector = connectorFor(approved.kind);

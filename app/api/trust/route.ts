@@ -1,11 +1,15 @@
 import { graduateKind, probe, trustRecords } from "@/lib/store";
+import { requireViewer } from "@/lib/auth";
 import { THRESHOLDS } from "@/lib/trust";
 import { ACTION_KINDS, type ActionKind } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-export async function GET() {
+export async function GET(request: Request) {
+  const who = await requireViewer(request);
+  if (who instanceof Response) return who;
+
   // Trust is replayed from the log at boot, so it is not readable until that
   // has happened. probe() is where the replay is awaited.
   await probe();
@@ -20,6 +24,9 @@ export async function GET() {
  * system side — work moving off supervision is always a person's call.
  */
 export async function POST(request: Request) {
+  const who = await requireViewer(request);
+  if (who instanceof Response) return who;
+
   let body: { kind?: string; confirmed?: boolean };
   try {
     body = (await request.json()) as { kind?: string; confirmed?: boolean };

@@ -215,7 +215,8 @@ export default defineSchema({
   })
     .index("by_handle", ["handle"])
     .index("by_status", ["status"])
-    .index("by_userId", ["userId"]),
+    .index("by_userId", ["userId"])
+    .index("by_userId_and_status", ["userId", "status"]),
 
   /**
    * Log lines are the high-churn half of an intern — kept in their own table
@@ -248,6 +249,15 @@ export default defineSchema({
   actions: defineTable({
     handle: v.string(),
     internHandle: v.union(v.string(), v.null()),
+    /**
+     * Whose intern proposed this. A draft is only ever shown to, and decidable
+     * by, its owner — it quotes whatever the intern read on that person's
+     * behalf, so it is no more shareable than the intern itself.
+     *
+     * Optional only because rows written before this field existed have no
+     * owner; those are readable by nobody, which is the safe direction.
+     */
+    ownerId: v.optional(v.id("users")),
     kind: v.union(v.literal("email"), v.literal("slack"), v.literal("calendar")),
     status: v.union(
       v.literal("pending"),
@@ -283,5 +293,7 @@ export default defineSchema({
   })
     .index("by_handle", ["handle"])
     .index("by_status", ["status"])
-    .index("by_internHandle", ["internHandle"]),
+    .index("by_internHandle", ["internHandle"])
+    .index("by_ownerId", ["ownerId"])
+    .index("by_ownerId_and_status", ["ownerId", "status"]),
 });
