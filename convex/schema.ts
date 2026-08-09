@@ -22,6 +22,8 @@ const nodeKind = v.union(
   v.literal("tag"),
   v.literal("intern"),
   v.literal("action"),
+  v.literal("fact"),
+  v.literal("question"),
 );
 
 const draft = v.object({
@@ -77,6 +79,59 @@ export default defineSchema({
   })
     .index("by_from", ["from"])
     .index("by_to", ["to"]),
+
+  // -------------------------------------------------------------------------
+  // The log — the only thing that is actually the truth
+  //
+  // Facts and relations above are a projection rebuilt from these rows, which
+  // is what "facts are a projection" has to mean if it means anything. This
+  // replaces .data/brain.jsonl: same append-only shape, somewhere every
+  // instance and every teammate can reach.
+  // -------------------------------------------------------------------------
+
+  observations: defineTable({
+    obsId: v.string(),
+    sourceId: v.string(),
+    /** `(sourceId, externalId)` is unique — the constraint that makes retry safe. */
+    externalId: v.string(),
+    actor: v.string(),
+    title: v.string(),
+    body: v.string(),
+    url: v.optional(v.string()),
+    observedAt: v.number(),
+    ingestedAt: v.number(),
+    /** What extraction made of it, so replay rebuilds the same facts. */
+    hint: v.optional(
+      v.object({
+        kind: v.union(
+          v.literal("note"),
+          v.literal("decision"),
+          v.literal("preference"),
+          v.literal("correction"),
+          v.literal("answer"),
+          v.literal("person"),
+          v.literal("project"),
+        ),
+        tags: v.optional(v.array(v.string())),
+        subject: v.optional(v.string()),
+      }),
+    ),
+  })
+    .index("by_obsId", ["obsId"])
+    .index("by_source_and_external", ["sourceId", "externalId"]),
+
+  /**
+   * A person's decision on a handover. Lives in the log beside observations
+   * because the accepted-unedited rate is the one number that must survive a
+   * restart — an intern that forgot it had been trusted would have to earn it
+   * again on every deploy.
+   */
+  decisions: defineTable({
+    actionId: v.string(),
+    role: v.string(),
+    outcome: v.union(v.literal("unedited"), v.literal("edited"), v.literal("rejected")),
+    at: v.number(),
+  }).index("by_actionId", ["actionId"]),
 
   // -------------------------------------------------------------------------
   // Interns

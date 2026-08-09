@@ -20,6 +20,8 @@ const nodeKind = v.union(
   v.literal("tag"),
   v.literal("intern"),
   v.literal("action"),
+  v.literal("fact"),
+  v.literal("question"),
 );
 
 const factFields = {

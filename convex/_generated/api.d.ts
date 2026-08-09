@@ -11,6 +11,7 @@
 import type * as auth from "../auth.js";
 import type * as brain from "../brain.js";
 import type * as interns from "../interns.js";
+import type * as log from "../log.js";
 import type * as outbox from "../outbox.js";
 
 import type {
@@ -23,6 +24,7 @@ declare const fullApi: ApiFromModules<{
   auth: typeof auth;
   brain: typeof brain;
   interns: typeof interns;
+  log: typeof log;
   outbox: typeof outbox;
 }>;
 
