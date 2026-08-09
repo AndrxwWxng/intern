@@ -156,16 +156,11 @@ export default function Cockpit() {
   const graph = useMemo<Graph>(() => {
     if (!convexGraph?.nodes.length) return streamGraph;
 
-    // The seeded graph exists so the UI is never dead on arrival. The moment
-    // the brain holds anything real, that reason is gone — and showing
-    // invented people beside real ones is worse than showing nothing. So real
-    // data doesn't merge with SIM, it replaces it. LIVE is a different case:
-    // Scout's graph is real too, so both are kept.
-    const simulated = streamGraph.mode === "sim";
-    const base = simulated ? [] : streamGraph.nodes;
-    const baseEdges = simulated ? [] : streamGraph.edges;
-
-    const nodes = new Map(base.map((n) => [n.id, n]));
+    // Seed suppression lives in `setBase` (lib/store.ts), not here — one rule,
+    // one place, so the stream's own node count never disagrees with the
+    // canvas. This is a plain union.
+    const baseEdges = streamGraph.edges;
+    const nodes = new Map(streamGraph.nodes.map((n) => [n.id, n]));
     for (const n of convexGraph.nodes) {
       nodes.set(n.id, {
         id: n.id,

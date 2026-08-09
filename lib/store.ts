@@ -174,11 +174,21 @@ export const getSystem = () => store.system;
 function setBase(next: Graph) {
   store.base = next;
   const facts = brain.projection();
-  const byId = new Map(next.nodes.map((n) => [n.id, n]));
+
+  // The seed exists so the UI is never dead on arrival. The moment the brain
+  // holds anything real that reason is gone, and showing invented people
+  // beside real ones is worse than showing nothing — so real facts replace the
+  // seed rather than joining it. LIVE is untouched: Scout's graph is real too,
+  // so there both halves are kept.
+  const seeded = next.mode === "sim" && facts.nodes.length > 0;
+  const baseNodes = seeded ? [] : next.nodes;
+  const baseEdges = seeded ? [] : next.edges;
+
+  const byId = new Map(baseNodes.map((n) => [n.id, n]));
   for (const n of facts.nodes) byId.set(n.id, n);
 
-  const seen = new Set(next.edges.map((e) => `${e.source}->${e.target}`));
-  const edges = [...next.edges];
+  const seen = new Set(baseEdges.map((e) => `${e.source}->${e.target}`));
+  const edges = [...baseEdges];
   for (const e of facts.edges) {
     const key = `${e.source}->${e.target}`;
     if (seen.has(key) || !byId.has(e.source) || !byId.has(e.target)) continue;
