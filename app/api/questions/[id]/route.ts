@@ -1,3 +1,4 @@
+import { requireViewer } from "@/lib/auth";
 import { answerQuestion, dismissQuestion } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
@@ -12,6 +13,9 @@ export async function POST(
   request: Request,
   ctx: RouteContext<"/api/questions/[id]">,
 ) {
+  const who = await requireViewer(request);
+  if (who instanceof Response) return who;
+
   const { id } = await ctx.params;
   let body: { answer?: string; dismiss?: boolean };
   try {
@@ -21,7 +25,7 @@ export async function POST(
   }
 
   if (body.dismiss) {
-    const question = dismissQuestion(id);
+    const question = dismissQuestion(id, who.userId);
     return question
       ? Response.json({ question, resumed: null })
       : Response.json({ error: `no open question ${id}` }, { status: 400 });
@@ -32,7 +36,7 @@ export async function POST(
     return Response.json({ error: "answer is required" }, { status: 400 });
   }
 
-  const result = answerQuestion(id, answer.slice(0, 2000));
+  const result = answerQuestion(id, answer.slice(0, 2000), "you", who.userId);
   if (!result) {
     return Response.json({ error: `no open question ${id}` }, { status: 400 });
   }

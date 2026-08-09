@@ -1,6 +1,6 @@
 import { getAuthUserId } from "@convex-dev/auth/server";
 import { v } from "convex/values";
-import { mutation, query } from "./_generated/server";
+import { type QueryCtx, mutation, query } from "./_generated/server";
 
 /**
  * Interns are durable now. They used to live in server memory pinned to
@@ -29,28 +29,51 @@ const ARTIFACT = v.object({
   ref: v.optional(v.string()),
 });
 
+/**
+ * An intern belongs to whoever dispatched it, and to nobody else.
+ *
+ * Every read below is scoped through `by_userId`, never `by_status` alone —
+ * an index that doesn't start at the owner is a query that can return someone
+ * else's work, and the only reliable way not to leak is not to have the row in
+ * hand in the first place. Signed out reads nothing rather than reading all.
+ */
 export const list = query({
   args: { status: v.optional(STATUS), limit: v.optional(v.number()) },
   handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    if (!userId) return [];
+
     const limit = Math.min(args.limit ?? 50, 200);
     if (args.status) {
       return await ctx.db
         .query("interns")
-        .withIndex("by_status", (q) => q.eq("status", args.status!))
+        .withIndex("by_userId_and_status", (q) =>
+          q.eq("userId", userId).eq("status", args.status!),
+        )
         .order("desc")
         .take(limit);
     }
-    return await ctx.db.query("interns").order("desc").take(limit);
+    return await ctx.db
+      .query("interns")
+      .withIndex("by_userId", (q) => q.eq("userId", userId))
+      .order("desc")
+      .take(limit);
   },
 });
 
 export const get = query({
   args: { handle: v.string() },
   handler: async (ctx, args) => {
-    return await ctx.db
+    const userId = await getAuthUserId(ctx);
+    if (!userId) return null;
+
+    const intern = await ctx.db
       .query("interns")
       .withIndex("by_handle", (q) => q.eq("handle", args.handle))
       .unique();
+    // Same answer for "no such intern" and "not yours" — telling them apart
+    // turns this into an oracle for which handles exist.
+    return intern?.userId === userId ? intern : null;
   },
 });
 
@@ -64,6 +87,9 @@ export const spawn = mutation({
   handler: async (ctx, args) => {
     // Never trust a caller-supplied user id — derive it server-side.
     const userId = await getAuthUserId(ctx);
+    // An ownerless intern would be one nobody can see and nobody can stop, so
+    // it is refused at the door rather than created and then hidden.
+    if (!userId) throw new Error("sign in to dispatch an intern");
 
     return await ctx.db.insert("interns", {
       handle: args.handle,
@@ -75,10 +101,21 @@ export const spawn = mutation({
       tools: [],
       toolCalls: 0,
       artifacts: [],
-      ...(userId ? { userId } : {}),
+      userId,
     });
   },
 });
+
+/** The caller's own intern by handle, or null — used by every guard below. */
+async function ownIntern(ctx: QueryCtx, handle: string) {
+  const userId = await getAuthUserId(ctx);
+  if (!userId) return null;
+  const intern = await ctx.db
+    .query("interns")
+    .withIndex("by_handle", (q) => q.eq("handle", handle))
+    .unique();
+  return intern?.userId === userId ? intern : null;
+}
 
 export const update = mutation({
   args: {
@@ -94,10 +131,7 @@ export const update = mutation({
   },
   handler: async (ctx, args) => {
     const { handle, ...patch } = args;
-    const intern = await ctx.db
-      .query("interns")
-      .withIndex("by_handle", (q) => q.eq("handle", handle))
-      .unique();
+    const intern = await ownIntern(ctx, handle);
     if (!intern) return { error: `no intern ${handle}` };
 
     await ctx.db.patch("interns", intern._id, patch);
@@ -108,10 +142,7 @@ export const update = mutation({
 export const cancel = mutation({
   args: { handle: v.string() },
   handler: async (ctx, args) => {
-    const intern = await ctx.db
-      .query("interns")
-      .withIndex("by_handle", (q) => q.eq("handle", args.handle))
-      .unique();
+    const intern = await ownIntern(ctx, args.handle);
     if (!intern) return { error: `no intern ${args.handle}` };
     if (intern.status === "done" || intern.status === "failed") {
       return { error: `${args.handle} already ${intern.status}` };
@@ -144,6 +175,12 @@ export const log = mutation({
     text: v.string(),
   },
   handler: async (ctx, args) => {
+    // A log line carries whatever the intern read, so it is exactly as private
+    // as the intern. Ownership lives on the intern rather than being copied
+    // onto every line — one owner per intern, not one per thousand log rows.
+    if (args.internHandle !== null && !(await ownIntern(ctx, args.internHandle))) {
+      return { error: `no intern ${args.internHandle}` };
+    }
     return await ctx.db.insert("logs", { ...args, ts: Date.now() });
   },
 });
@@ -151,14 +188,39 @@ export const log = mutation({
 export const recentLogs = query({
   args: { internHandle: v.optional(v.string()), limit: v.optional(v.number()) },
   handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    if (!userId) return [];
+
     const limit = Math.min(args.limit ?? 200, 500);
     if (args.internHandle) {
+      if (!(await ownIntern(ctx, args.internHandle))) return [];
       return await ctx.db
         .query("logs")
         .withIndex("by_internHandle", (q) => q.eq("internHandle", args.internHandle!))
         .order("desc")
         .take(limit);
     }
-    return await ctx.db.query("logs").order("desc").take(limit);
+
+    // No handle given: the caller's own interns, newest first, then their
+    // lines. Bounded by how many interns one person has, not by table size.
+    const mine = await ctx.db
+      .query("interns")
+      .withIndex("by_userId", (q) => q.eq("userId", userId))
+      .order("desc")
+      .take(50);
+
+    const lines = (
+      await Promise.all(
+        mine.map((intern) =>
+          ctx.db
+            .query("logs")
+            .withIndex("by_internHandle", (q) => q.eq("internHandle", intern.handle))
+            .order("desc")
+            .take(limit),
+        ),
+      )
+    ).flat();
+
+    return lines.sort((a, b) => b.ts - a.ts).slice(0, limit);
   },
 });

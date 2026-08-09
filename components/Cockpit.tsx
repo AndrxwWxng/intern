@@ -1,6 +1,6 @@
 "use client";
 
-import { useAuthActions } from "@convex-dev/auth/react";
+import { useAuthActions, useAuthToken } from "@convex-dev/auth/react";
 import { useQuery } from "convex/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/convex/_generated/api";
@@ -55,6 +55,7 @@ export default function Cockpit() {
   const [brain, setBrain] = useState<BrainStats | null>(null);
   const [connectors, setConnectors] = useState<ConnectorsState | null>(null);
   const [connected, setConnected] = useState(false);
+  const token = useAuthToken();
   const convexGraph = useQuery(api.brain.graph, {});
   const convexOutbox = useQuery(api.outbox.list, {});
 
@@ -72,6 +73,9 @@ export default function Cockpit() {
       {
         id: -++localSeq.current,
         internId: null,
+        // Typed as a stream line but never came from the stream — it is echoed
+        // straight into this one terminal and no server ever sees it.
+        ownerId: null,
         ts: Date.now(),
         level,
         text,
@@ -79,18 +83,37 @@ export default function Cockpit() {
     ]);
   }, []);
 
+  /**
+   * Every call to the Node half carries the same token the Convex client uses,
+   * because those routes now answer as somebody rather than as everybody.
+   */
+  const authFetch = useCallback(
+    (input: string, init?: RequestInit) =>
+      fetch(input, {
+        ...init,
+        headers: {
+          ...init?.headers,
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      }),
+    [token],
+  );
+
   // --- event stream -------------------------------------------------------
+  //
+  // `fetch`, not `EventSource`. The stream is scoped to whoever is signed in,
+  // so it has to carry the auth token, and EventSource cannot set headers —
+  // the only alternative is a token in the query string, which lands in every
+  // access log on the way. Same SSE wire format, read by hand; reconnection is
+  // ours to do too, since that came free with EventSource and doesn't here.
   useEffect(() => {
-    const es = new EventSource("/api/events");
-    es.onopen = () => setConnected(true);
-    es.onerror = () => setConnected(false);
-    es.onmessage = (msg) => {
-      let e: CockpitEvent | { type: "ping" };
-      try {
-        e = JSON.parse(msg.data);
-      } catch {
-        return;
-      }
+    if (!token) return;
+
+    const controller = new AbortController();
+    let stopped = false;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+
+    const dispatch = (e: CockpitEvent | { type: "ping" }) => {
       switch (e.type) {
         case "snapshot":
           setInterns(e.interns);
@@ -140,19 +163,75 @@ export default function Cockpit() {
           break;
       }
     };
-    return () => es.close();
-  }, []);
+
+    const read = async () => {
+      try {
+        const res = await fetch("/api/events", {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: controller.signal,
+        });
+        if (!res.ok || !res.body) throw new Error(`stream ${res.status}`);
+        setConnected(true);
+
+        const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+        let buffer = "";
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += value;
+
+          // SSE frames are separated by a blank line; anything after the last
+          // one is a partial frame and has to wait for the next chunk.
+          const frames = buffer.split("\n\n");
+          buffer = frames.pop() ?? "";
+          for (const frame of frames) {
+            const data = frame
+              .split("\n")
+              .filter((l) => l.startsWith("data:"))
+              .map((l) => l.slice(5).trim())
+              .join("\n");
+            if (!data) continue;
+            try {
+              dispatch(JSON.parse(data) as CockpitEvent);
+            } catch {
+              /* a malformed frame is not worth dropping the stream over */
+            }
+          }
+        }
+      } catch {
+        /* fall through to the reconnect below */
+      }
+
+      if (stopped) return;
+      setConnected(false);
+      retry = setTimeout(read, 2000);
+    };
+
+    void read();
+    return () => {
+      stopped = true;
+      if (retry) clearTimeout(retry);
+      controller.abort();
+    };
+  }, [token]);
 
   useEffect(() => {
+    if (!token) return;
     let alive = true;
-    fetch("/api/connectors")
-      .then((r) => r.json())
-      .then((d: ConnectorsState) => alive && setConnectors(d))
+    authFetch("/api/connectors")
+      // This route can answer 401 now, and an error body is still valid JSON —
+      // storing one would put `{error}` where the rail expects a state object,
+      // and its `!connectors` guard doesn't catch a truthy wrong shape. Leave
+      // it null instead: the rail already renders "checking…" for that.
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: ConnectorsState | null) => {
+        if (alive && d && Array.isArray(d.connectors)) setConnectors(d);
+      })
       .catch(() => {});
     return () => {
       alive = false;
     };
-  }, []);
+  }, [token, authFetch]);
 
   const graph = useMemo<Graph>(() => {
     if (!convexGraph?.nodes.length) return streamGraph;
@@ -200,6 +279,9 @@ export default function Cockpit() {
       byId.set(row.handle, {
         id: row.handle,
         internId: row.internHandle,
+        // `api.outbox.list` only ever returns this viewer's rows, so anything
+        // arriving here is already theirs.
+        ownerId: row.ownerId ?? null,
         role: row.role,
         kind: row.kind,
         status: row.status,
@@ -232,27 +314,27 @@ export default function Cockpit() {
   // --- actions ------------------------------------------------------------
   const spawn = useCallback(
     async (task: string, role?: RoleId) => {
-      const res = await fetch("/api/interns", {
+      const res = await authFetch("/api/interns", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ task, role }),
       });
       if (!res.ok) echo("err", `spawn failed: ${res.status}`);
     },
-    [echo],
+    [echo, authFetch],
   );
 
   const kill = useCallback(
     async (id: string) => {
-      const res = await fetch(`/api/interns/${id}`, { method: "DELETE" });
+      const res = await authFetch(`/api/interns/${id}`, { method: "DELETE" });
       if (!res.ok) echo("err", `no such intern: ${id}`);
     },
-    [echo],
+    [echo, authFetch],
   );
 
   const decide = useCallback(
     async (id: string, decision: Decision) => {
-      const res = await fetch(`/api/outbox/${id}`, {
+      const res = await authFetch(`/api/outbox/${id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(decision),
@@ -266,49 +348,49 @@ export default function Cockpit() {
         echo("warn", `${id} approved — no connector wired, waiting on an external sender`);
       }
     },
-    [echo],
+    [echo, authFetch],
   );
 
   const answer = useCallback(
     async (id: string, text: string) => {
-      const res = await fetch(`/api/questions/${id}`, {
+      const res = await authFetch(`/api/questions/${id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ answer: text }),
       });
       if (!res.ok) echo("err", `could not answer ${id}`);
     },
-    [echo],
+    [echo, authFetch],
   );
 
   const dismiss = useCallback(
     async (id: string) => {
-      const res = await fetch(`/api/questions/${id}`, {
+      const res = await authFetch(`/api/questions/${id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ dismiss: true }),
       });
       if (!res.ok) echo("err", `could not drop ${id}`);
     },
-    [echo],
+    [echo, authFetch],
   );
 
   const graduate = useCallback(
     async (role: RoleId, confirmed: boolean) => {
-      const res = await fetch("/api/roster", {
+      const res = await authFetch("/api/roster", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ role, confirmed }),
       });
       if (!res.ok) echo("err", `could not change ${role}`);
     },
-    [echo],
+    [echo, authFetch],
   );
 
   const captureText = useCallback(
     async (text: string) => {
       const [head, ...rest] = text.split(/\n|(?<=[.!?])\s+/);
-      const res = await fetch("/api/capture", {
+      const res = await authFetch("/api/capture", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -319,14 +401,17 @@ export default function Cockpit() {
       });
       if (!res.ok) echo("err", "capture failed");
     },
-    [echo],
+    [echo, authFetch],
   );
 
   const refresh = useCallback(async () => {
     setRefreshing(true);
     echo("sys", "re-reading brain…");
     try {
-      const res = await fetch("/api/brain?refresh=1");
+      const res = await authFetch("/api/brain?refresh=1");
+      // An error body parses as JSON perfectly well; `data.graph` would then
+      // be undefined and the canvas would take the crash instead of the log.
+      if (!res.ok) throw new Error(`brain ${res.status}`);
       const data = (await res.json()) as { graph: Graph };
       setStreamGraph(data.graph);
       echo(
@@ -338,7 +423,7 @@ export default function Cockpit() {
     } finally {
       setRefreshing(false);
     }
-  }, [echo]);
+  }, [echo, authFetch]);
 
   const run = useCallback(
     (raw: string) => {
@@ -372,7 +457,7 @@ export default function Cockpit() {
           return;
         case "ask": {
           if (!arg) return echo("err", "usage: ask <question>");
-          void fetch("/api/ask", {
+          void authFetch("/api/ask", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ question: arg }),
@@ -463,6 +548,7 @@ export default function Cockpit() {
       }
     },
     [
+      authFetch,
       answer,
       captureText,
       decide,

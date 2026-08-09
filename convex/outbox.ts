@@ -1,5 +1,6 @@
+import { getAuthUserId } from "@convex-dev/auth/server";
 import { v } from "convex/values";
-import { mutation, query } from "./_generated/server";
+import { type QueryCtx, mutation, query } from "./_generated/server";
 
 /**
  * Interns propose. A human decides. Someone else sends.
@@ -33,31 +34,54 @@ const STATUSES = v.union(
   v.literal("failed"),
 );
 
+/**
+ * The caller's own draft by handle, or null.
+ *
+ * A draft is scoped to the person whose intern wrote it. The decision is still
+ * a human one — it just isn't a *shared* one, because the draft quotes pages
+ * and messages the intern read on one person's behalf.
+ */
+async function ownAction(ctx: QueryCtx, handle: string) {
+  const userId = await getAuthUserId(ctx);
+  if (!userId) return null;
+  const action = await ctx.db
+    .query("actions")
+    .withIndex("by_handle", (q) => q.eq("handle", handle))
+    .unique();
+  return action?.ownerId === userId ? action : null;
+}
+
 export const list = query({
   args: {
     status: v.optional(STATUSES),
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    if (!userId) return [];
+
     const limit = Math.min(args.limit ?? 50, 200);
     if (args.status) {
       return await ctx.db
         .query("actions")
-        .withIndex("by_status", (q) => q.eq("status", args.status!))
+        .withIndex("by_ownerId_and_status", (q) =>
+          q.eq("ownerId", userId).eq("status", args.status!),
+        )
         .order("desc")
         .take(limit);
     }
-    return await ctx.db.query("actions").order("desc").take(limit);
+    return await ctx.db
+      .query("actions")
+      .withIndex("by_ownerId", (q) => q.eq("ownerId", userId))
+      .order("desc")
+      .take(limit);
   },
 });
 
 export const get = query({
   args: { handle: v.string() },
   handler: async (ctx, args) => {
-    return await ctx.db
-      .query("actions")
-      .withIndex("by_handle", (q) => q.eq("handle", args.handle))
-      .unique();
+    return await ownAction(ctx, args.handle);
   },
 });
 
@@ -73,14 +97,22 @@ export const propose = mutation({
     sources: v.array(v.string()),
   },
   handler: async (ctx, args) => {
+    const ownerId = await getAuthUserId(ctx);
+    if (!ownerId) throw new Error("sign in to propose an action");
+
     const existing = await ctx.db
       .query("actions")
       .withIndex("by_handle", (q) => q.eq("handle", args.handle))
       .unique();
-    if (existing) return existing._id;
+    // Idempotent on handle, but only for the owner — otherwise proposing onto
+    // a handle someone else already used would silently return their row.
+    if (existing) {
+      return existing.ownerId === ownerId ? existing._id : null;
+    }
 
     return await ctx.db.insert("actions", {
       ...args,
+      ownerId,
       status: "pending",
       createdAt: Date.now(),
     });
@@ -112,10 +144,7 @@ export const approve = mutation({
       };
     }
 
-    const action = await ctx.db
-      .query("actions")
-      .withIndex("by_handle", (q) => q.eq("handle", args.handle))
-      .unique();
+    const action = await ownAction(ctx, args.handle);
     if (!action) return { error: `no action ${args.handle}` };
     if (action.status !== "pending") {
       return { error: `${args.handle} is already ${action.status}` };
@@ -133,6 +162,7 @@ export const approve = mutation({
       status: "approved",
       decidedAt: Date.now(),
       decidedVia: args.via,
+      decidedBy: action.ownerId,
       ...(args.accepted ? { accepted: args.accepted, editedFields: [...editedFields] } : {}),
     });
 
@@ -155,16 +185,14 @@ export const reject = mutation({
     note: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const action = await ctx.db
-      .query("actions")
-      .withIndex("by_handle", (q) => q.eq("handle", args.handle))
-      .unique();
+    const action = await ownAction(ctx, args.handle);
     if (!action) return { error: `no action ${args.handle}` };
 
     await ctx.db.patch("actions", action._id, {
       status: "rejected",
       decidedAt: Date.now(),
       decidedVia: args.via,
+      decidedBy: action.ownerId,
       result: args.note,
     });
     return { ok: true };
@@ -179,10 +207,7 @@ export const recordResult = mutation({
     detail: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const action = await ctx.db
-      .query("actions")
-      .withIndex("by_handle", (q) => q.eq("handle", args.handle))
-      .unique();
+    const action = await ownAction(ctx, args.handle);
     if (!action) return { error: `no action ${args.handle}` };
 
     await ctx.db.patch("actions", action._id, {
