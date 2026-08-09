@@ -135,8 +135,6 @@ export default function InternRail({
               ) : null}
 
               <div className="mt-1.5 flex items-center gap-2 text-faint">
-                <span>{i.role}</span>
-                <span>·</span>
                 <span>{i.mode === "live" ? "live" : "sim"}</span>
                 <span>·</span>
                 <span>{i.toolCalls} calls</span>

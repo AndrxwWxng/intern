@@ -56,10 +56,41 @@ export const appendObservation = mutation({
   },
 });
 
+/**
+ * Take an observation back out of the log.
+ *
+ * The log is append-only because observations are things that were *seen*, and
+ * editing history is how a brain starts lying. This is the one exception it
+ * needs: a row that was never an observation at all — a placeholder someone
+ * invented to unblock a demo, something captured by mistake, something private
+ * that should not be in a shared brain. There is no honest way to correct those
+ * in place, because `appendObservation` is idempotent on
+ * `(sourceId, externalId)` — re-capturing the same key is a no-op, not an
+ * update. Retract, then capture the true one under the same key.
+ *
+ * Facts need no cleanup: they are a projection, rebuilt from this log on the
+ * next boot.
+ */
+export const retract = mutation({
+  args: { sourceId: v.string(), externalId: v.string() },
+  handler: async (ctx, args) => {
+    const row = await ctx.db
+      .query("observations")
+      .withIndex("by_source_and_external", (q) =>
+        q.eq("sourceId", args.sourceId).eq("externalId", args.externalId),
+      )
+      .unique();
+    if (!row) return { retracted: false, obsId: null };
+
+    await ctx.db.delete(row._id);
+    return { retracted: true, obsId: row.obsId };
+  },
+});
+
 export const appendDecision = mutation({
   args: {
     actionId: v.string(),
-    role: v.string(),
+    kind: v.string(),
     outcome: v.union(v.literal("unedited"), v.literal("edited"), v.literal("rejected")),
     at: v.number(),
   },
@@ -109,7 +140,7 @@ export const replay = query({
         .sort((a, b) => a.at - b.at)
         .map((d) => ({
           actionId: d.actionId,
-          role: d.role,
+          kind: d.kind,
           outcome: d.outcome,
           at: d.at,
         })),

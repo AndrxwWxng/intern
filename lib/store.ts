@@ -22,10 +22,10 @@ import type {
   Mode,
   ProposedAction,
   Question,
-  RoleId,
   SystemState,
 } from "./types";
 import { outgoing } from "./types";
+import { parseActionBlock } from "./action-block";
 import * as scout from "./scout";
 import {
   planSim,
@@ -41,7 +41,6 @@ import {
   execute,
 } from "./connectors";
 import * as brain from "./brain";
-import { DEFAULT_ROLE, getRole, pickRole } from "./roster";
 import * as trust from "./trust";
 
 const LOG_CAP = 1200;
@@ -306,26 +305,22 @@ export async function refreshGraph(): Promise<Graph> {
 // that already belong to something.
 let counter = store.interns.size;
 
-export function spawn(
-  task: string,
-  opts: { role?: RoleId; resumes?: string } = {},
-): Intern {
+export function spawn(task: string, opts: { resumes?: string } = {}): Intern {
   const n = ++counter;
   const id = `int-${n.toString(36).padStart(2, "0")}${Math.random()
     .toString(36)
     .slice(2, 4)}`;
-  const role = opts.role ?? pickRole(task);
   const intern: Intern = {
     id,
     handle: id,
     task,
-    role,
     status: "queued",
     mode: store.system.reachable ? "live" : "sim",
     createdAt: Date.now(),
     resumes: opts.resumes,
     tools: [],
     toolCalls: 0,
+    toolErrors: 0,
     artifacts: [],
     sessionId: `cockpit-${id}`,
   };
@@ -339,21 +334,21 @@ export function spawn(
         label: id,
         kind: "intern",
         weight: 5,
-        detail: `${role} · ${task.slice(0, 70)}`,
+        detail: task.slice(0, 70),
       },
     ],
     [{ source: "brain", target: id, rel: "dispatched" }],
   );
 
   emit({ type: "intern", intern });
-  log(id, "sys", `spawned as ${role} · ${task}`);
+  log(id, "sys", `spawned · ${task}`);
   brain.note({
     kind: "spawn",
     actor: "you",
     internId: id,
     sourceId: null,
     ref: id,
-    detail: `${role}: ${task.slice(0, 120)}`,
+    detail: task.slice(0, 120),
   });
 
   store.queue.push(id);
@@ -409,7 +404,17 @@ async function run(intern: Intern) {
       intern.status = "done";
       intern.endedAt = Date.now();
       touch(intern);
-      log(intern.id, "ok", `finished in ${elapsed(intern)}`);
+      // "finished" on its own reads as "worked". If steps failed along the way
+      // the intern still has an answer, but the person reading it deserves to
+      // know it was assembled over holes.
+      const failures = intern.toolErrors
+        ? ` · ${intern.toolErrors} tool call${intern.toolErrors === 1 ? "" : "s"} failed`
+        : "";
+      log(
+        intern.id,
+        intern.toolErrors ? "warn" : "ok",
+        `finished in ${elapsed(intern)}${failures}`,
+      );
     }
   } catch (err) {
     if (ctl.signal.aborted) {
@@ -433,15 +438,15 @@ const elapsed = (i: Intern) =>
   `${(((i.endedAt ?? Date.now()) - (i.startedAt ?? i.createdAt)) / 1000).toFixed(1)}s`;
 
 /**
- * Everything the brain has learned about how this role should work, rendered
- * for the brief.
+ * Everything the brain has learned about how work should be done, rendered for
+ * the brief.
  *
  * This is the entire learning loop and it is deliberately this small: a person
  * corrects a draft, the correction becomes a fact, the next brief retrieves it,
  * behaviour changes. Nobody wrote a rule and there is no training job.
  */
 function recalled(intern: Intern): { text: string; facts: Fact[] } {
-  const preferences = brain.preferencesFor(intern.role, 5);
+  const preferences = brain.preferences(5);
   const context = brain.recall(intern.task, { limit: 4 }).filter(
     (f) => !preferences.some((p) => p.id === f.id),
   );
@@ -462,8 +467,6 @@ ${lines.join("\n")}
 
 const BRIEF = (intern: Intern, learned: string) =>
   `You are an intern working a long-running task for the team.
-
-${getRole(intern.role).charter}
 
 TASK: ${intern.task}
 ${learned}
@@ -498,14 +501,9 @@ someone ten seconds. Ask at most one per run, and only when you are genuinely
 blocked.`;
 
 async function runLive(intern: Intern, signal: AbortSignal) {
-  let buffer = "";
-  /** Everything the agent said, kept whole — the buffer is drained by logging. */
+  const out = scout.lanes((text) => log(intern.id, "out", text));
+  /** Everything the *top-level* agent said. Sub-agent chatter is not the answer. */
   let said = "";
-  const flush = () => {
-    const text = buffer.trim();
-    buffer = "";
-    if (text) log(intern.id, "out", text);
-  };
 
   const learned = recalled(intern);
   if (learned.facts.length) {
@@ -525,7 +523,7 @@ async function runLive(intern: Intern, signal: AbortSignal) {
     const kind = String(ev.event ?? "");
 
     if (kind.includes("ToolCallStarted") || kind === "tool_call_started") {
-      flush();
+      out.flush(ev);
       const name =
         ev.tool?.tool_name ?? ev.tools?.[0]?.tool_name ?? "tool";
       intern.toolCalls++;
@@ -542,7 +540,13 @@ async function runLive(intern: Intern, signal: AbortSignal) {
         typeof result === "string"
           ? result.replace(/\s+/g, " ").slice(0, 240)
           : "";
-      log(intern.id, "ok", `${name} → ${preview || "ok"}`);
+      // A failed tool used to be logged at "ok" like any other, so the stream
+      // showed `web_search → Error: Timed out` behind a green tick. Whether a
+      // step worked is the one thing the line has to get right.
+      const failed =
+        ev.tool?.tool_call_error === true || /^Error:/.test(preview.trim());
+      if (failed) intern.toolErrors++;
+      log(intern.id, failed ? "err" : "ok", `${name} → ${preview || "ok"}`);
       if (name.startsWith("update_")) {
         const artifact = {
           kind: name.includes("knowledge") ? ("wiki" as const) : ("note" as const),
@@ -561,11 +565,16 @@ async function runLive(intern: Intern, signal: AbortSignal) {
     // meant nothing was ever parsed out of it and nothing reached the brain.
     if (kind.includes("RunCompleted") || kind === "run_completed") {
       const content = typeof ev.content === "string" ? ev.content : "";
+      const lane = out.lane(ev);
       if (content) {
-        buffer += content;
-        said += content;
+        lane.text += content;
+        if (lane.main) said += content;
       }
-      flush();
+      out.flush(ev);
+      // Every context provider completes too, and each one carries its own
+      // answer. Taking them all meant the summary was whichever sub-agent
+      // happened to finish last rather than what the intern concluded.
+      if (!lane.main) continue;
       // Fall back to everything streamed: some runs deliver the answer as
       // deltas and complete with an empty payload.
       const final = (content || said).trim();
@@ -574,21 +583,22 @@ async function runLive(intern: Intern, signal: AbortSignal) {
     }
 
     if (typeof ev.content === "string" && ev.content) {
-      buffer += ev.content;
-      said += ev.content;
+      const lane = out.lane(ev);
+      lane.text += ev.content;
+      if (lane.main) said += ev.content;
       // Flush on sentence-ish boundaries so the terminal reads like a stream
       // of thoughts rather than one wall of text at the end.
-      if (buffer.length > 160 || /[.\n]$/.test(buffer)) flush();
+      if (lane.text.length > 160 || /[.\n]$/.test(lane.text)) out.flush(ev);
       continue;
     }
 
     if (kind.includes("RunError") || kind.includes("Error")) {
-      flush();
+      out.flushAll();
       throw new Error(String(ev.content ?? "scout run error"));
     }
   }
 
-  flush();
+  out.flushAll();
 
   if (intern.summary) {
     // A question outranks a proposal: an intern that asked and also drafted
@@ -623,7 +633,7 @@ async function runSim(intern: Intern, signal: AbortSignal) {
     );
   }
 
-  const question = simQuestion(intern.task, intern.role);
+  const question = simQuestion(intern.task);
   const steps = planSim(intern.task, intern.id);
   for (const step of steps) {
     await sleep(step.delay, signal);
@@ -653,11 +663,7 @@ async function runSim(intern: Intern, signal: AbortSignal) {
 
   const outbound = simOutboundDraft(intern.task);
   if (outbound) {
-    const proposed = proposeAction({
-      internId: intern.id,
-      role: intern.role,
-      ...outbound,
-    });
+    const proposed = proposeAction({ internId: intern.id, ...outbound });
     intern.artifacts.push({
       kind: "answer",
       label: `proposed email: ${proposed.draft.subject}`,
@@ -712,7 +718,6 @@ export function askQuestion(
   const row: Question = {
     id,
     internId: intern.id,
-    role: intern.role,
     question: question.slice(0, 500),
     context: context.slice(0, 1000),
     status: "open",
@@ -776,7 +781,6 @@ export function answerQuestion(
     title: question.question,
     body: answer,
     actor,
-    subject: question.role,
     tags: ["answered"],
     internId: question.internId,
   });
@@ -816,7 +820,7 @@ export function answerQuestion(
     touch(parked);
     resumed = spawn(
       `${parked.task}\n\nYou asked: ${question.question}\nThe answer is: ${answer}\nCarry on from there.`,
-      { role: parked.role, resumes: parked.id },
+      { resumes: parked.id },
     );
     question.resumedBy = resumed.id;
     graft([], [{ source: id, target: resumed.id, rel: "resumed" }]);
@@ -886,7 +890,7 @@ export async function capture(input: {
   url?: string;
   tags?: string[];
   kind?: Fact["kind"];
-  /** Also put an archivist on writing it into the wiki properly. */
+  /** Also put an intern on writing it into the wiki properly. */
   file?: boolean;
 }): Promise<{ fact: Fact; fresh: boolean; merged: boolean; intern: Intern | null }> {
   await brain.ready();
@@ -919,7 +923,6 @@ export async function capture(input: {
       `File this into the knowledge wiki and link it to what already exists.\n\nTITLE: ${input.title}\n\n${input.body}${
         input.url ? `\n\nSOURCE: ${input.url}` : ""
       }`,
-      { role: "archivist" },
     );
   }
 
@@ -963,12 +966,8 @@ export async function ask(question: string): Promise<void> {
     return;
   }
 
-  let buffer = "";
-  const flush = () => {
-    const t = buffer.trim();
-    buffer = "";
-    if (t) log(null, "out", t);
-  };
+  // Same interleaving as a live intern run — one lane per run, not one buffer.
+  const out = scout.lanes((text) => log(null, "out", text));
 
   try {
     for await (const ev of scout.runStream(question, {
@@ -976,14 +975,15 @@ export async function ask(question: string): Promise<void> {
     })) {
       const kind = String(ev.event ?? "");
       if (kind.includes("ToolCallStarted")) {
-        flush();
+        out.flush(ev);
         log(null, "tool", `${ev.tool?.tool_name ?? "tool"}(…)`);
       } else if (typeof ev.content === "string" && ev.content) {
-        buffer += ev.content;
-        if (buffer.length > 160 || /[.\n]$/.test(buffer)) flush();
+        const lane = out.lane(ev);
+        lane.text += ev.content;
+        if (lane.text.length > 160 || /[.\n]$/.test(lane.text)) out.flush(ev);
       }
     }
-    flush();
+    out.flushAll();
   } catch (err) {
     log(null, "err", err instanceof Error ? err.message : String(err));
   }
@@ -1010,7 +1010,6 @@ export const getAction = (id: string) => store.outbox.get(id) ?? null;
 
 export function proposeAction(input: {
   internId: string | null;
-  role?: RoleId;
   kind: ActionKind;
   title: string;
   draft: Draft;
@@ -1020,14 +1019,9 @@ export function proposeAction(input: {
   const id = `act-${(++actionCounter).toString(36).padStart(2, "0")}${Math.random()
     .toString(36)
     .slice(2, 4)}`;
-  const role =
-    input.role ??
-    (input.internId ? store.interns.get(input.internId)?.role : undefined) ??
-    DEFAULT_ROLE;
   const action: ProposedAction = {
     id,
     internId: input.internId,
-    role,
     kind: input.kind,
     status: "pending",
     title: input.title,
@@ -1049,7 +1043,7 @@ export function proposeAction(input: {
     internId: input.internId,
     sourceId: null,
     ref: id,
-    detail: `${role} proposed ${input.kind}: ${input.draft.subject}`,
+    detail: `proposed ${input.kind}: ${input.draft.subject}`,
   });
 
   const nodes: GraphNode[] = [
@@ -1067,12 +1061,12 @@ export function proposeAction(input: {
   }
   graft(nodes, edges);
 
-  // A graduated role has already been judged on this kind of work often enough
-  // that a person said to stop reviewing it. Honouring that is the whole point
-  // of graduation — but it happens loudly, in the same stream as everything
-  // else, so nobody discovers it after the fact.
-  if (trust.isGraduated(role)) {
-    log(input.internId, "sys", `${role} is graduated · ${id} goes without review`);
+  // This kind of work has already been judged often enough that a person said
+  // to stop reviewing it. Honouring that is the whole point of graduation — but
+  // it happens loudly, in the same stream as everything else, so nobody
+  // discovers it after the fact.
+  if (trust.isGraduated(input.kind)) {
+    log(input.internId, "sys", `${input.kind} is graduated · ${id} goes without review`);
     void approveAndSend(id, "graduated");
   }
   return action;
@@ -1155,7 +1149,7 @@ export function approveAction(
   );
 
   // Graduated work is not supervised, so it is not evidence about supervision.
-  // Counting it would let a role's rate drift up on decisions nobody made.
+  // Counting it would let the rate drift up on decisions nobody made.
   if (via !== "graduated") {
     recordDecision(action, edited.length ? "edited" : "unedited");
   }
@@ -1196,36 +1190,36 @@ export function rejectAction(
   const fact = brain.learn({
     kind: "correction",
     title: `do not send: ${action.draft.subject}`,
-    body: `A ${action.role} drafted a ${action.kind} to ${action.draft.to.join(", ")} and a person rejected it.\n\nReason given: ${reason}\n\nWhat was drafted:\n${action.draft.body}`,
-    subject: action.role,
+    body: `An intern drafted a ${action.kind} to ${action.draft.to.join(", ")} and a person rejected it.\n\nReason given: ${reason}\n\nWhat was drafted:\n${action.draft.body}`,
+    subject: action.kind,
     tags: ["rejected", action.kind],
     internId: action.internId,
   });
-  log(action.internId, "sys", `filed the reason as ${fact.id} · the next ${action.role} reads it first`);
+  log(action.internId, "sys", `filed the reason as ${fact.id} · the next intern reads it first`);
   emit({ type: "brain", brain: brain.stats() });
   return action;
 }
 
-/** Fold the decision into the role's record, and say so if a line was crossed. */
+/** Fold the decision into this kind's record, and say so if a line was crossed. */
 function recordDecision(
   action: ProposedAction,
   outcome: "unedited" | "edited" | "rejected",
 ) {
   const { trust: record, proposed, revoked } = trust.record(
-    action.role,
+    action.kind,
     action.id,
     outcome,
   );
   emit({ type: "trust", trust: trust.all() });
 
   if (revoked) {
-    log(null, "warn", `${action.role} un-graduated · back to supervised on every draft`);
+    log(null, "warn", `${action.kind} un-graduated · back to supervised on every draft`);
   }
   if (proposed) {
     log(
       null,
       "ok",
-      `${action.role} is ready to graduate · ${Math.round(record.rate * 100)}% accepted unedited over ${record.decisions} · run "graduate ${action.role}" to confirm`,
+      `${action.kind} is ready to graduate · ${record.unedited} of ${record.decisions} accepted unedited · run "graduate ${action.kind}" to confirm`,
     );
   }
 }
@@ -1244,9 +1238,9 @@ function learnFromEdit(
 ) {
   const fact = brain.learn({
     kind: "preference",
-    title: `${action.role}: ${edited.join(" and ")} rewritten before sending`,
+    title: `${action.kind}: ${edited.join(" and ")} rewritten before sending`,
     body: [
-      `A ${action.role} drafted a ${action.kind}; a person rewrote it before approving.`,
+      `An intern drafted a ${action.kind}; a person rewrote it before approving.`,
       "",
       ...edited.flatMap((field) => [
         `${String(field).toUpperCase()} — proposed:`,
@@ -1257,14 +1251,14 @@ function learnFromEdit(
       ]),
       "Write it the accepted way next time.",
     ].join("\n"),
-    subject: action.role,
+    subject: action.kind,
     tags: ["voice", action.kind],
     internId: action.internId,
   });
   log(
     action.internId,
     "sys",
-    `learned ${fact.id} from your edit · every ${action.role} from now on starts with it`,
+    `learned ${fact.id} from your edit · every intern from now on starts with it`,
   );
   emit({ type: "brain", brain: brain.stats() });
 }
@@ -1273,15 +1267,15 @@ function learnFromEdit(
 // Graduation
 // ---------------------------------------------------------------------------
 
-export function graduateRole(role: RoleId, confirmed: boolean) {
-  const record = trust.graduate(role, confirmed);
+export function graduateKind(kind: ActionKind, confirmed: boolean) {
+  const record = trust.graduate(kind, confirmed);
   emit({ type: "trust", trust: trust.all() });
   log(
     null,
     confirmed ? "ok" : "sys",
     confirmed
-      ? `${role} graduated · its drafts now go without review, and one rejection takes it back`
-      : `${role} stays supervised`,
+      ? `${kind} graduated · those drafts now go without review, and one rejection takes it back`
+      : `${kind} stays supervised`,
   );
   return record;
 }
@@ -1337,40 +1331,19 @@ export function parseProposedAction(
   report: string,
   intern: Intern,
 ): ProposedAction | null {
-  const match = report.match(/```action\s*([\s\S]*?)```/);
-  if (!match) return null;
-  try {
-    const raw = JSON.parse(match[1].trim()) as {
-      kind?: string;
-      to?: string[] | string;
-      cc?: string[] | string;
-      subject?: string;
-      body?: string;
-      rationale?: string;
-      sources?: string[];
-    };
-    const to = Array.isArray(raw.to) ? raw.to : raw.to ? [raw.to] : [];
-    if (!to.length || !raw.subject || !raw.body) return null;
-    const kind: ActionKind =
-      raw.kind === "slack" || raw.kind === "calendar" ? raw.kind : "email";
-    return proposeAction({
-      internId: intern.id,
-      role: intern.role,
-      kind,
-      title: `${kind} to ${to.join(", ")} — ${raw.subject}`,
-      draft: {
-        to,
-        cc: Array.isArray(raw.cc) ? raw.cc : raw.cc ? [raw.cc] : undefined,
-        subject: raw.subject,
-        body: raw.body,
-      },
-      rationale: raw.rationale ?? "proposed by the intern from its findings",
-      sources: raw.sources ?? [],
-    });
-  } catch {
-    log(intern.id, "warn", "final report had an action block that wasn't valid JSON");
+  const parsed = parseActionBlock(report);
+  if (!parsed) return null;
+
+  // An unusable block used to return null with nothing said, so a run that
+  // drafted a Slack post and had it dropped over a field name looked exactly
+  // like one that decided there was nothing to send — right down to "finished"
+  // in the stream. Whatever else happens, this gets said out loud.
+  if ("error" in parsed) {
+    log(intern.id, "err", `${parsed.error} — nothing was queued to send`);
     return null;
   }
+
+  return proposeAction({ internId: intern.id, ...parsed });
 }
 
 // ---------------------------------------------------------------------------

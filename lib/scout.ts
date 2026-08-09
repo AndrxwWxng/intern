@@ -121,10 +121,75 @@ export async function graph(): Promise<Graph | null> {
 export type ScoutEvent = {
   event?: string;
   content?: unknown;
-  tool?: { tool_name?: string; tool_args?: unknown; result?: unknown };
+  /**
+   * Which run emitted this. Scout's context providers are agents of their own,
+   * and their runs stream down the *same* HTTP response as the top-level one —
+   * so events from four concurrent runs arrive interleaved chunk by chunk.
+   * Anything accumulating `content` has to key on this or it splices sentences
+   * from different agents together.
+   */
+  run_id?: string;
+  /** Set on a sub-agent's events; absent on the top-level run. */
+  parent_run_id?: string | null;
+  /** `scout`, `knowledge-read`, `crm-read`, `workspace`… */
+  agent_id?: string;
+  tool?: {
+    tool_name?: string;
+    tool_args?: unknown;
+    result?: unknown;
+    /** Set by agno when the call itself failed, not when it returned nothing. */
+    tool_call_error?: boolean;
+  };
   tools?: { tool_name?: string }[];
   [k: string]: unknown;
 };
+
+export type Lane = { label: string; main: boolean; text: string };
+
+/**
+ * Split a run stream into one output lane per run.
+ *
+ * Scout's context providers are agents in their own right, and their runs come
+ * down the *same* HTTP response as the top-level one: one measured brief
+ * alternated between four concurrent runs 794 times. A single accumulator
+ * therefore spliced them mid-sentence — "StatusThe wiki contains: only one
+ * unknown/not source found" — which on a projector reads as the thing being
+ * broken. Keyed on `run_id` each agent's prose stays whole, and sub-agent lines
+ * say whose they are.
+ */
+export function lanes(sink: (text: string) => void) {
+  const open = new Map<string, Lane>();
+  const key = (ev: ScoutEvent) => String(ev.run_id ?? "main");
+
+  const drain = (k: string) => {
+    const lane = open.get(k);
+    if (!lane) return;
+    open.delete(k);
+    const text = lane.text.trim();
+    if (text) sink(lane.label + text);
+  };
+
+  return {
+    /** The lane this event belongs to, opened on first sight. */
+    lane(ev: ScoutEvent): Lane {
+      const k = key(ev);
+      let lane = open.get(k);
+      if (!lane) {
+        // Only the top-level run has no parent. Everything else is a context
+        // provider answering one `query_*` call.
+        const main = !ev.parent_run_id;
+        lane = { label: main ? "" : `${ev.agent_id ?? k} · `, main, text: "" };
+        open.set(k, lane);
+      }
+      return lane;
+    },
+    flush: (ev: ScoutEvent) => drain(key(ev)),
+    /** Everything still mid-sentence — end of stream, or an error. */
+    flushAll: () => {
+      for (const k of [...open.keys()]) drain(k);
+    },
+  };
+}
 
 /**
  * Stream an agent run. Yields decoded agno run events.

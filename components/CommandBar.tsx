@@ -3,8 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 
 export const HELP = [
-  "spawn <task>            dispatch an intern; a role is picked from the brief",
-  "spawn as <role> <task>  pick the role yourself",
+  "spawn <task>            dispatch an intern",
   "ask <question>          ask the brain directly (no intern)",
   "capture <what you know> put a fact into the brain by hand",
   "kill <id>               stop an intern",
@@ -16,9 +15,9 @@ export const HELP = [
   "asks                    what the interns are stuck on",
   "answer <id> <answer>    unblock one; the answer becomes a fact",
   "",
-  "roster                  each role's accepted-unedited rate",
-  "graduate <role>         let it work unsupervised",
-  "supervise <role>        put it back under review",
+  "trust                   accepted-unedited rate per email/slack/calendar",
+  "graduate <kind>         let that kind go out unreviewed",
+  "supervise <kind>        put it back under review",
   "",
   "focus <id|all>          filter the stream",
   "graph refresh           re-read the brain",

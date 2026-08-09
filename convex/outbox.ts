@@ -9,13 +9,6 @@ import { mutation, query } from "./_generated/server";
  * credentials when none is configured) and reports back via `recordResult`.
  */
 
-const ROLE = v.union(
-  v.literal("researcher"),
-  v.literal("correspondent"),
-  v.literal("archivist"),
-  v.literal("onboarder"),
-);
-
 const DRAFT = v.object({
   to: v.array(v.string()),
   cc: v.optional(v.array(v.string())),
@@ -65,7 +58,6 @@ export const propose = mutation({
   args: {
     handle: v.string(),
     internHandle: v.union(v.string(), v.null()),
-    role: ROLE,
     kind: v.union(v.literal("email"), v.literal("slack"), v.literal("calendar")),
     title: v.string(),
     draft: DRAFT,
@@ -140,7 +132,6 @@ export const approve = mutation({
     return {
       handle: action.handle,
       kind: action.kind,
-      role: action.role,
       draft: args.accepted ?? action.draft,
       edited: editedFields.length > 0,
     };

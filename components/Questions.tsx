@@ -61,7 +61,6 @@ function Ask({
       <div className="flex items-center gap-2">
         <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-k-question pulse-slow" />
         <span className="text-fg">{question.internId ?? question.id}</span>
-        <span className="text-faint">{question.role}</span>
         <span className="ml-auto text-faint">{question.id}</span>
       </div>
 
