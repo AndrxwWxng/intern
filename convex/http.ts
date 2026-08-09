@@ -13,6 +13,7 @@
 
 import { httpRouter } from "convex/server";
 import { internal } from "./_generated/api";
+import { auth } from "./auth";
 import { httpAction } from "./_generated/server";
 import { PROVIDERS, isProviderId, type ProviderId, type TokenResponse } from "./providers";
 import type { Id } from "./_generated/dataModel";
@@ -24,6 +25,18 @@ type PendingHandshake = {
 };
 
 const http = httpRouter();
+
+/**
+ * Must come before anything else here.
+ *
+ * `auth.config.ts` names CONVEX_SITE_URL as the token issuer, so Convex
+ * resolves `/.well-known/openid-configuration` and `/.well-known/jwks.json`
+ * against *this* router to validate a session. Without this line those two
+ * paths 404, discovery fails, and every sign-in hangs at "checking session"
+ * with a freshly created account already in the database — the failure is on
+ * the verify side, so it looks like the form is stuck rather than rejected.
+ */
+auth.addHttpRoutes(http);
 
 const APP_URL = () => process.env.APP_URL ?? "http://localhost:3000";
 const CALLBACK = () => `${process.env.CONVEX_SITE_URL}/oauth/callback`;
