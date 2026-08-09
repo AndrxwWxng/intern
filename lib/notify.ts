@@ -69,3 +69,51 @@ export async function notifyQuestion(input: {
     };
   }
 }
+
+/**
+ * Tell someone their intern finished.
+ *
+ * Soft like `notifyQuestion`, and for a stronger reason: the work is already
+ * done and filed by the time this runs. Failing to announce it must never look
+ * like the run itself failed, so the caller only logs what came back.
+ */
+export async function notifyDone(input: {
+  userId: string;
+  internId: string;
+  role: string;
+  task: string;
+  status: string;
+  summary?: string;
+  artifacts?: string[];
+  took?: string;
+}): Promise<NotifyResult> {
+  const site = SITE_URL();
+  const secret = process.env.INTERN_SERVICE_SECRET;
+  if (!site || !secret) {
+    return { delivered: false, detail: "notify not configured" };
+  }
+
+  try {
+    const res = await fetch(`${site}/notify/done`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${secret}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(input),
+      cache: "no-store",
+    });
+    const data = (await res.json().catch(() => ({}))) as Partial<NotifyResult> & {
+      error?: string;
+    };
+    if (!res.ok) {
+      return { delivered: false, detail: data.error ?? `HTTP ${res.status}` };
+    }
+    return { delivered: data.delivered === true, detail: data.detail ?? "sent" };
+  } catch (err) {
+    return {
+      delivered: false,
+      detail: err instanceof Error ? err.message : "unreachable",
+    };
+  }
+}

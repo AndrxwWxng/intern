@@ -249,6 +249,97 @@ http.route({
 });
 
 /**
+ * An intern finished — tell whoever dispatched it.
+ *
+ * Same shared-secret shape as `/notify/question`, and for the same reason: by
+ * the time a long run ends, the request that started it is long gone.
+ */
+http.route({
+  path: "/notify/done",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    if (!serviceAuthorised(request)) {
+      return Response.json({ error: "unauthorised" }, { status: 401 });
+    }
+
+    const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+    if (
+      !body ||
+      typeof body.userId !== "string" ||
+      typeof body.internId !== "string" ||
+      typeof body.task !== "string"
+    ) {
+      return Response.json({ error: "bad request" }, { status: 400 });
+    }
+
+    const str = (v: unknown, max: number) =>
+      typeof v === "string" && v ? v.slice(0, max) : undefined;
+
+    const result = await ctx.runAction(internal.slack.notifyDone, {
+      userId: body.userId as Id<"users">,
+      internId: body.internId,
+      role: str(body.role, 40) ?? "intern",
+      task: body.task.slice(0, 1000),
+      status: str(body.status, 20) ?? "done",
+      summary: str(body.summary, 3000),
+      artifacts: Array.isArray(body.artifacts)
+        ? body.artifacts.filter((a): a is string => typeof a === "string").slice(0, 20)
+        : undefined,
+      took: str(body.took, 20),
+    });
+
+    return Response.json(result);
+  }),
+});
+
+/**
+ * Send an approved draft as the person who approved it.
+ *
+ * Same shared-secret shape as `/notify/question`: the caller is the Next
+ * process acting for a named user, not a browser. The user id comes from the
+ * action's owner, which was established from a real token when the approval
+ * came in — nothing here trusts a browser's claim about who it is.
+ *
+ * The reply is a verdict, never a token. "not-connected" is a distinct answer
+ * from "failed" because the outbox must not mark a draft sent, or failed, when
+ * the truth is that nobody ever linked an account for it to go out from.
+ */
+http.route({
+  path: "/send/email",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    if (!serviceAuthorised(request)) {
+      return Response.json({ error: "unauthorised" }, { status: 401 });
+    }
+
+    const body = (await request.json().catch(() => null)) as {
+      userId?: unknown;
+      to?: unknown;
+      cc?: unknown;
+      subject?: unknown;
+      body?: unknown;
+    } | null;
+
+    const list = (value: unknown) =>
+      Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+
+    if (!body || typeof body.userId !== "string" || typeof body.subject !== "string") {
+      return Response.json({ error: "bad request" }, { status: 400 });
+    }
+
+    const verdict = await ctx.runAction(internal.gmail.sendAs, {
+      userId: body.userId as Id<"users">,
+      to: list(body.to),
+      cc: list(body.cc),
+      subject: body.subject,
+      body: typeof body.body === "string" ? body.body : "",
+    });
+
+    return Response.json(verdict);
+  }),
+});
+
+/**
  * Verify Slack's request signature.
  *
  * The raw body has to be hashed exactly as sent, so this takes the text rather

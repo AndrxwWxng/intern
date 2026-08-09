@@ -4,6 +4,7 @@ import { KIND_COLOR, KIND_ORDER } from "./BrainGraph";
 import Roster from "./Roster";
 import type {
   BrainStats,
+  ActionKind,
   ConnectorsState,
   Graph,
   GraphNode,
@@ -16,6 +17,7 @@ import type {
 export default function BrainRail({
   system,
   connectors,
+  onConnect,
   trust,
   brain,
   onGraduate,
@@ -29,6 +31,7 @@ export default function BrainRail({
 }: {
   system: SystemState;
   connectors: ConnectorsState | null;
+  onConnect: (kind: ActionKind) => void;
   trust: TrustRecord[];
   brain: BrainStats | null;
   onGraduate: (role: RoleId, confirmed: boolean) => void;
@@ -118,22 +121,64 @@ export default function BrainRail({
           <>
             {connectors.connectors.map((c) => (
               <div key={c.kind} className="flex items-center gap-2 py-0.5">
+                {/*
+                  Green means *you* can send on this surface — not that the
+                  deployment has credentials somewhere. A dot that tracked
+                  configuration was how an unconnected account still read as
+                  ready, and a draft could report itself sent.
+                */}
                 <span
                   className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                    c.configured ? "bg-ok" : "bg-line-2"
+                    c.connected
+                      ? "bg-ok"
+                      : c.broken
+                        ? "bg-err"
+                        : "bg-line-2"
                   }`}
                 />
                 <span className="text-dim">{c.kind}</span>
                 <span
                   className="ml-auto min-w-0 truncate text-faint"
                   title={
-                    c.configured
-                      ? c.label
-                      : `set ${c.missing.join(", ")} to enable`
+                    c.broken
+                      ? `reconnect — ${c.brokenReason ?? "the grant is no longer valid"}`
+                      : c.connected
+                        ? `sends as ${c.account ?? "your connected account"}`
+                        : c.configured
+                          ? "you have not connected an account for this yet"
+                          : `set ${c.missing.join(", ")} to enable`
                   }
                 >
-                  {c.configured ? (c.id ?? "") : "—"}
+                  {c.connected ? (c.account ?? c.id ?? "connected") : ""}
                 </span>
+                {/*
+                  A surface you can't send on is only useful if the fix is
+                  right there. `configured` still gates it: when the deployment
+                  has no client credentials there is nothing to hand off to,
+                  and a button that always failed would be its own small lie.
+                */}
+                {c.connected ? null : c.configured ? (
+                  <button
+                    type="button"
+                    onClick={() => onConnect(c.kind)}
+                    className={`shrink-0 border px-1.5 transition-colors ${
+                      c.broken
+                        ? "border-err/50 text-err hover:bg-err/10"
+                        : "border-line text-faint hover:border-line-2 hover:text-fg"
+                    }`}
+                    title={
+                      c.broken
+                        ? `reconnect — ${c.brokenReason ?? "the grant is no longer valid"}`
+                        : "authorise your account for this surface"
+                    }
+                  >
+                    {c.broken ? "reconnect" : "connect"}
+                  </button>
+                ) : (
+                  <span className="shrink-0 text-faint" title={`set ${c.missing.join(", ")}`}>
+                    —
+                  </span>
+                )}
               </div>
             ))}
             {connectors.dryRun ? (

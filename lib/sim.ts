@@ -93,7 +93,13 @@ export function seedGraph(): Graph {
 
   CONTACTS.forEach(([name, detail, t], i) => {
     const id = `contact:${i}`;
-    push({ id, label: name, kind: "contact", weight: 5, detail, meta: { table: "scout_contacts" } });
+    // People the seed invented, so NOT `contact` — that kind means "has an
+    // account on the platform" and is derived from the accounts table in
+    // `convex/brain.ts::graph`. The cockpit unions this graph with that one,
+    // so calling these contacts put six fictional colleagues in the same list
+    // as the real ones with nothing to tell them apart. Ids and edges are
+    // unchanged; only the claim about what they are is.
+    push({ id, label: name, kind: "fact", weight: 5, detail, meta: { table: "scout_contacts" } });
     link("src:crm", id, "row");
     bind(id, t);
   });

@@ -41,7 +41,7 @@ import {
   execute,
 } from "./connectors";
 import * as brain from "./brain";
-import { notifyQuestion } from "./notify";
+import { notifyDone, notifyQuestion } from "./notify";
 import { DEFAULT_ROLE, getRole, pickRole } from "./roster";
 import * as trust from "./trust";
 
@@ -530,6 +530,43 @@ async function run(intern: Intern) {
     }
   } finally {
     store.controllers.delete(intern.id);
+    // Whatever happened, whoever asked for it hears about it. A long run is
+    // one you walked away from, so the cockpit is the wrong place to leave the
+    // only copy of the answer.
+    //
+    // Cancelled runs are skipped: you cancelled it, you already know.
+    if (intern.status !== "cancelled") void announce(intern);
+  }
+}
+
+/**
+ * DM the owner that their intern is done.
+ *
+ * Never throws and never awaited by the run: the work is finished and filed by
+ * this point, so a Slack outage must not turn a successful run into a failed
+ * one. It reports into the intern's own log either way, so a notification that
+ * didn't land is visible rather than silent.
+ */
+async function announce(intern: Intern): Promise<void> {
+  if (!intern.ownerId) return;
+  try {
+    const { delivered, detail } = await notifyDone({
+      userId: intern.ownerId,
+      internId: intern.id,
+      role: intern.role,
+      task: intern.task,
+      status: intern.status,
+      summary: intern.summary ?? intern.error,
+      artifacts: intern.artifacts.map((a) => a.label),
+      took: elapsed(intern),
+    });
+    log(
+      intern.id,
+      delivered ? "ok" : "warn",
+      delivered ? `result sent to slack · ${detail}` : `could not slack the result · ${detail}`,
+    );
+  } catch {
+    /* announcing is best-effort by design */
   }
 }
 
@@ -1586,10 +1623,30 @@ export async function executeAction(id: string): Promise<ProposedAction | null> 
 
   log(action.internId, "tool", `${connector.id}.send(${id})${DRY_RUN ? " · DRY RUN" : ""}`);
   const result = await execute(action);
+
+  // Nothing was attempted, because the approver has no account linked for this
+  // surface. The draft stays `approved` and keeps its place in the outbox: it
+  // is not sent, and it is not broken either. Recording "sent" here is exactly
+  // the lie this path used to tell, and "failed" would be a different one.
+  if (result.notConnected) {
+    action.result = result.detail;
+    store.outbox.set(id, action);
+    emit({ type: "action", action });
+    log(action.internId, "warn", `${id} not sent · ${result.detail}`);
+    return action;
+  }
+
   return recordActionResult(id, result.ok ? "sent" : "failed", result.detail);
 }
 
-/** Approve and, if we hold the credentials, send it ourselves. */
+/**
+ * Approve and, if the approver's own account can carry it, send it.
+ *
+ * `dispatched` means the thing actually left — not that a connector existed
+ * and we had a go. The cockpit shows a success line off this flag, so anything
+ * looser turns "we tried" into "it's sent" on screen, which is the whole class
+ * of bug this path had.
+ */
 export async function approveAndSend(
   id: string,
   via: Decision,
@@ -1603,7 +1660,8 @@ export async function approveAndSend(
   if (!connector) return { action: approved, dispatched: false };
 
   const settled = await executeAction(id);
-  return { action: settled ?? approved, dispatched: true };
+  const action = settled ?? approved;
+  return { action, dispatched: action.status === "sent" };
 }
 
 export { connectorStatus };

@@ -35,6 +35,9 @@ export async function POST(request: Request) {
     url?: string;
     tags?: string[];
     kind?: string;
+    subject?: string;
+    links?: string[];
+    stated?: boolean;
     file?: boolean;
   };
   try {
@@ -63,6 +66,14 @@ export async function POST(request: Request) {
     kind: KINDS.includes(body.kind as FactKind)
       ? (body.kind as FactKind)
       : undefined,
+    subject: body.subject?.trim() || undefined,
+    // Capped and de-duplicated here rather than downstream: these become graph
+    // edges, and a caller that sends the same node a thousand times should get
+    // one edge and no say in how much work that costs.
+    links: Array.isArray(body.links)
+      ? [...new Set(body.links.filter((l) => typeof l === "string" && l.trim()))].slice(0, 12)
+      : undefined,
+    stated: body.stated === true,
     file: body.file === true,
     ownerId: who.userId,
   });

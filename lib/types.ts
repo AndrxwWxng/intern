@@ -338,7 +338,24 @@ export type ConnectorStatus = {
   /** null when nothing is configured for this surface. */
   id: string | null;
   label: string;
+  /**
+   * The plumbing is in place — an operator has set what this deployment needs.
+   * Says nothing about whether *you* can send, which is `connected`.
+   */
   configured: boolean;
+  /**
+   * You, specifically, have a live grant for this surface.
+   *
+   * Kept apart from `configured` because collapsing the two is what let the
+   * panel show a green light off nothing but environment variables, while the
+   * viewer had never linked an account.
+   */
+  connected: boolean;
+  /** Which account it would go out as, when connected. */
+  account?: string;
+  /** Connected once, but the grant is dead — revoked, expired. Reconnect. */
+  broken?: boolean;
+  brokenReason?: string;
   requires: string[];
   missing: string[];
 };

@@ -273,6 +273,84 @@ export const askOwner = internalAction({
 });
 
 /**
+ * Tell someone their intern finished.
+ *
+ * The counterpart to `askOwner`: that one fires when work stops early, this
+ * one when it stops for good. Same delivery path, so whatever gets a stuck
+ * intern to you gets its result to you too.
+ *
+ * A DM from the workspace bot is not the same thing as sending mail *as* you —
+ * nobody is being impersonated here, the app is reporting to its own user — so
+ * this deliberately keeps the `SLACK_BOT_TOKEN` fallback that the outbox no
+ * longer has.
+ */
+export const notifyDone = internalAction({
+  args: {
+    userId: v.id("users"),
+    internId: v.string(),
+    role: v.string(),
+    task: v.string(),
+    status: v.string(),
+    summary: v.optional(v.string()),
+    artifacts: v.optional(v.array(v.string())),
+    took: v.optional(v.string()),
+  },
+  returns: v.object({ delivered: v.boolean(), detail: v.string() }),
+  handler: async (ctx, args): Promise<{ delivered: boolean; detail: string }> => {
+    const { delivery, detail: how } = await deliveryFor(ctx, args.userId);
+    if (!delivery) return { delivered: false, detail: how };
+
+    const opened = await slackCall(OPEN, delivery.botToken, {
+      users: delivery.providerUserId,
+    });
+    const channel =
+      opened.channel && typeof opened.channel === "object" && "id" in opened.channel
+        ? String((opened.channel as { id?: unknown }).id ?? "")
+        : "";
+    if (!opened.ok || !channel) {
+      return { delivered: false, detail: `conversations.open: ${opened.error ?? "no channel"}` };
+    }
+
+    const ok = args.status === "done";
+    const mark = ok ? "✅" : args.status === "cancelled" ? "⏹" : "⚠️";
+    const head = `${mark} *${args.internId}* · ${args.role} ${
+      ok ? "finished" : args.status
+    }${args.took ? ` in ${args.took}` : ""}`;
+
+    const filed = args.artifacts?.length
+      ? `Filed ${args.artifacts.length}: ${args.artifacts.slice(0, 6).join(", ")}`
+      : "Nothing filed to the brain.";
+
+    const sent = await slackCall(POST, delivery.botToken, {
+      channel,
+      // `text` is what shows in the notification and on any client that can't
+      // render blocks, so it has to stand alone rather than repeat the header.
+      text: `${args.internId} ${args.status}: ${args.task}`.slice(0, 300),
+      blocks: [
+        {
+          type: "section",
+          text: { type: "mrkdwn", text: `${head}\n\n>${args.task.replace(/\n/g, "\n>")}` },
+        },
+        ...(args.summary
+          ? [
+              {
+                type: "section",
+                text: { type: "mrkdwn", text: args.summary.slice(0, 2800) },
+              },
+            ]
+          : []),
+        { type: "context", elements: [{ type: "mrkdwn", text: filed }] },
+      ],
+    });
+
+    if (!sent.ok || !sent.ts) {
+      return { delivered: false, detail: `chat.postMessage: ${sent.error ?? "no ts"}` };
+    }
+    return { delivered: true, detail: `${how} · dm ${channel}@${sent.ts}` };
+  },
+});
+
+/**
  * Say something back — "got it", or why the answer didn't land.
  *
  * `threadTs` null posts into the DM rather than a thread, which is the only

@@ -1,86 +1,102 @@
 /**
- * Gmail connector — sends an approved draft as the authorised user.
+ * Gmail connector — sends an approved draft as the person who approved it.
  *
- * Raw REST over fetch rather than googleapis: one dependency-free call, and
- * the message we build is the message that goes out with nothing in between.
+ * This process never holds anyone's mail grant. It hands the action's owner id
+ * and the message to Convex over the service-secret route, and learns only
+ * whether it went. `convex/gmail.ts` does the sending, next to the only place
+ * refresh tokens live.
+ *
+ * There is no shared-account fallback, and that removal is the point of this
+ * file. It used to send with a single `GOOGLE_REFRESH_TOKEN` from the
+ * environment whenever one was set — so a draft went out from whichever
+ * account happened to have minted that token, the outbox recorded "sent", and
+ * the person who approved it saw success with nothing in their own Sent mail.
+ * A connector that cannot send as you now declines, and says so.
  */
 
-import { googleAccessToken, googleConfigured, invalidateGoogleToken } from "./google";
-import { DRY_RUN, dry, encodeHeader, type Connector, type SendResult } from "./types";
+import { DRY_RUN, dry, type Connector, type SendResult } from "./types";
 import { outgoing, type ProposedAction } from "../types";
 
-const ENDPOINT = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
+const SITE_URL = () =>
+  process.env.CONVEX_SITE_URL ??
+  process.env.NEXT_PUBLIC_CONVEX_URL?.replace(".convex.cloud", ".convex.site");
 
-function buildRfc822(action: ProposedAction): string {
-  const { to, cc, subject, body } = outgoing(action);
-  const from = process.env.GOOGLE_SENDER;
+/**
+ * Whether the *bridge* is wired — not whether any particular person has
+ * connected. Per-person state is only knowable once we have an action to look
+ * at an owner on, so it is decided in `send`, not here.
+ */
+const bridgeReady = () =>
+  Boolean(process.env.INTERN_SERVICE_SECRET && SITE_URL());
 
-  const headers = [
-    from ? `From: ${from}` : null,
-    `To: ${to.join(", ")}`,
-    cc?.length ? `Cc: ${cc.join(", ")}` : null,
-    `Subject: ${encodeHeader(subject)}`,
-    "MIME-Version: 1.0",
-    'Content-Type: text/plain; charset="UTF-8"',
-    "Content-Transfer-Encoding: 8bit",
-  ].filter(Boolean);
-
-  return `${headers.join("\r\n")}\r\n\r\n${body.replace(/\n/g, "\r\n")}`;
-}
-
-async function post(raw: string, retry = true): Promise<Response> {
-  const token = await googleAccessToken();
-  const res = await fetch(ENDPOINT, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      raw: Buffer.from(raw, "utf8")
-        .toString("base64")
-        .replace(/\+/g, "-")
-        .replace(/\//g, "_")
-        .replace(/=+$/, ""),
-    }),
-    cache: "no-store",
-  });
-
-  // A stale cached token is the one failure worth one silent retry.
-  if (res.status === 401 && retry) {
-    invalidateGoogleToken();
-    return post(raw, false);
-  }
-  return res;
-}
+type Verdict = { status: "sent" | "not-connected" | "failed"; detail: string };
 
 export const gmail: Connector = {
   id: "gmail",
   kind: "email",
-  label: process.env.GOOGLE_SENDER
-    ? `gmail · ${process.env.GOOGLE_SENDER}`
-    : "gmail · authorised account",
-  requires: ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN"],
-  configured: googleConfigured,
+  label: "gmail · as the approver",
+  // What an operator has to set for *anyone* to be able to send. The Google
+  // client id and secret live on the Convex deployment, not here, because that
+  // is the side that performs the OAuth exchange.
+  requires: ["INTERN_SERVICE_SECRET", "NEXT_PUBLIC_CONVEX_URL"],
+  configured: bridgeReady,
 
-  async send(action): Promise<SendResult> {
-    const { to, subject } = outgoing(action);
+  async send(action: ProposedAction): Promise<SendResult> {
+    const { to, cc, subject, body } = outgoing(action);
     if (!to.length) return { ok: false, detail: "no recipients" };
     if (DRY_RUN) return dry(`emailed "${subject}" to ${to.join(", ")}`);
 
-    const res = await post(buildRfc822(action));
-    const data = (await res.json().catch(() => ({}))) as {
-      id?: string;
-      threadId?: string;
-      error?: { message?: string };
-    };
-
-    if (!res.ok || !data.id) {
+    // No owner means the draft predates per-user ownership, or was made by a
+    // machine caller with nobody attached. Either way there is no mailbox this
+    // could honestly go out from.
+    if (!action.ownerId) {
       return {
         ok: false,
-        detail: `gmail ${res.status}: ${data.error?.message ?? "send failed"}`,
+        notConnected: true,
+        detail: "no owner on this draft — spawn a new intern so it can send as you",
       };
     }
-    return { ok: true, detail: `gmail message ${data.id} (thread ${data.threadId})` };
+
+    const site = SITE_URL();
+    const secret = process.env.INTERN_SERVICE_SECRET;
+    if (!site || !secret) {
+      return { ok: false, detail: "email bridge not configured" };
+    }
+
+    try {
+      const res = await fetch(`${site}/send/email`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${secret}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ userId: action.ownerId, to, cc, subject, body }),
+        cache: "no-store",
+      });
+
+      const data = (await res.json().catch(() => ({}))) as Partial<Verdict> & {
+        error?: string;
+      };
+      if (!res.ok) {
+        return { ok: false, detail: data.error ?? `HTTP ${res.status}` };
+      }
+
+      if (data.status === "sent") {
+        return { ok: true, detail: data.detail ?? "sent" };
+      }
+      if (data.status === "not-connected") {
+        return {
+          ok: false,
+          notConnected: true,
+          detail: data.detail ?? "connect your Google account to send as you",
+        };
+      }
+      return { ok: false, detail: data.detail ?? "send failed" };
+    } catch (err) {
+      return {
+        ok: false,
+        detail: err instanceof Error ? err.message : "convex unreachable",
+      };
+    }
   },
 };
