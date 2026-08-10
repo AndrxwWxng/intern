@@ -61,6 +61,23 @@ test("an unusable block reports why instead of vanishing", () => {
   assert.match(notJson.error, /valid JSON/);
 });
 
+test("a block is found however far into the report it sits", () => {
+  // The run on 9 Aug that produced nothing: ~355 characters of prose before the
+  // fence, then a ~620-character block. Parsing ran on `summary`, clipped to
+  // 600 for the rail, so the closing fence was cut and the block read as
+  // absent. Anything parsing a report must parse the whole report.
+  const prose = "Found: ".padEnd(360, "x");
+  const report = `${prose}\n\n\`\`\`action\n{"kind":"slack","channel":"C0BP0HJC6DU","body":"${"y".repeat(500)}"}\n\`\`\``;
+  assert.ok(report.length > 600, "fixture must exceed the display clip");
+
+  const parsed = parseActionBlock(report);
+  assert.ok(parsed && !("error" in parsed), "whole report must still yield a draft");
+  assert.deepEqual(parsed.draft.to, ["C0BP0HJC6DU"]);
+
+  // And the failure this guards against: clipped, it vanishes entirely.
+  assert.equal(parseActionBlock(report.slice(0, 600)), null);
+});
+
 test("an unknown kind falls back to email rather than being dropped", () => {
   const parsed = parseActionBlock(
     '```action\n{"kind":"carrier-pigeon","to":"a@b.co","body":"hi"}\n```',

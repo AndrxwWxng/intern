@@ -610,6 +610,17 @@ async function runLive(intern: Intern, signal: AbortSignal) {
   const out = scout.lanes((text) => log(intern.id, "out", text));
   /** Everything the *top-level* agent said. Sub-agent chatter is not the answer. */
   let said = "";
+  /**
+   * The final report, whole.
+   *
+   * Kept apart from `intern.summary`, which is clipped to 600 characters for
+   * the rail. Parsing used to read the clipped copy, so a report whose prose
+   * ran past ~350 characters lost the closing fence of its ```action block —
+   * the regex then matched nothing, the draft was dropped, and because the
+   * block looked absent rather than broken not even the "why" line fired. A
+   * display limit must never decide what the intern is allowed to have said.
+   */
+  let report = "";
 
   const learned = recalled(intern);
   if (learned.facts.length) {
@@ -684,7 +695,10 @@ async function runLive(intern: Intern, signal: AbortSignal) {
       // Fall back to everything streamed: some runs deliver the answer as
       // deltas and complete with an empty payload.
       const final = (content || said).trim();
-      if (final) intern.summary = final.slice(0, 600);
+      if (final) {
+        report = final;
+        intern.summary = final.slice(0, 600);
+      }
       continue;
     }
 
@@ -706,15 +720,15 @@ async function runLive(intern: Intern, signal: AbortSignal) {
 
   out.flushAll();
 
-  if (intern.summary) {
+  if (report) {
     // A question outranks a proposal: an intern that asked and also drafted
     // built that draft on the assumption it just said it could not make.
-    const asked = parseQuestion(intern.summary, intern);
+    const asked = parseQuestion(report, intern);
     if (asked) {
       park(intern, asked);
       return;
     }
-    const proposed = parseProposedAction(intern.summary, intern);
+    const proposed = parseProposedAction(report, intern);
     if (proposed) {
       intern.artifacts.push({
         kind: "answer",
