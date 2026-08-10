@@ -211,8 +211,16 @@ export default defineSchema({
    */
   decisions: defineTable({
     actionId: v.string(),
-    /** Which surface it went out on — trust is earned per kind, not per intern. */
-    kind: v.string(),
+    /**
+     * Which surface it went out on — trust is earned per kind, not per intern.
+     *
+     * Optional only to admit rows written before the roster was removed, which
+     * carry `role` instead. `log:backfillDecisionKinds` converts them; the
+     * field is required in spirit and every writer sets it.
+     */
+    kind: v.optional(v.string()),
+    /** Legacy. A pre-roster-removal row's job title. Read only by the backfill. */
+    role: v.optional(v.string()),
     outcome: v.union(v.literal("unedited"), v.literal("edited"), v.literal("rejected")),
     at: v.number(),
   }).index("by_actionId", ["actionId"]),

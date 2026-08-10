@@ -8,7 +8,6 @@ import type {
   ConnectorsState,
   Graph,
   GraphNode,
-  ActionKind,
   NodeKind,
   SystemState,
   TrustRecord,

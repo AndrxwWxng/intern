@@ -32,7 +32,6 @@ export async function notifyQuestion(input: {
   userId: string;
   questionId: string;
   internId: string | null;
-  role: string;
   question: string;
   context: string;
 }): Promise<NotifyResult> {
@@ -80,7 +79,6 @@ export async function notifyQuestion(input: {
 export async function notifyDone(input: {
   userId: string;
   internId: string;
-  role: string;
   task: string;
   status: string;
   summary?: string;
