@@ -1,0 +1,14 @@
+{
+    "experimentalServices": {
+        "web": {
+            "root": ".",
+            "mountPath": "/",
+            "framework": "nextjs",
+            "buildCommand": "npm ci && npm run build"
+        },
+        "scout": {
+            "root": "scout",
+            "mountPath": "/api/scout"
+        }
+    }
+}
