@@ -259,6 +259,12 @@ export default function Cockpit() {
     for (const e of convexGraph.edges) {
       const key = `${e.source}|${e.target}|${e.rel ?? ""}`;
       if (seen.has(key)) continue;
+      // Both ends have to exist here. Fact edges always arrived with their own
+      // nodes, but an intern's edges are written the moment it spawns and can
+      // land before the node they point at — and a d3 force layout throws on an
+      // endpoint it cannot find, which takes the whole canvas down rather than
+      // dropping one line.
+      if (!nodes.has(e.source) || !nodes.has(e.target)) continue;
       seen.add(key);
       edges.push({ source: e.source, target: e.target, rel: e.rel ?? undefined });
     }

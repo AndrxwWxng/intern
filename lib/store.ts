@@ -329,6 +329,11 @@ function graft(nodes: GraphNode[], edges: GraphEdge[]) {
     edges: nextEdges,
     generatedAt: Date.now(),
   });
+
+  // The same nodes go to Convex, so the other person's cockpit draws them too.
+  // Without this an intern only ever existed on the laptop that spawned it, and
+  // "one shared brain" was true of facts and of nothing else.
+  void brain.share(nodes, edges);
 }
 
 // ---------------------------------------------------------------------------
