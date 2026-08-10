@@ -13,6 +13,17 @@ export type SendResult = {
   detail: string;
   /** True when DRY_RUN swallowed the call. */
   dryRun?: boolean;
+  /**
+   * The approver has no working grant for this surface, so nothing was even
+   * attempted.
+   *
+   * Distinct from `ok: false` on purpose. A failure means we tried and the
+   * provider said no, which is worth showing as a red line against the draft.
+   * This means the draft is still perfectly good and is waiting on a person to
+   * link an account — marking that "failed" reads as "this draft is broken"
+   * and sends people looking in the wrong place.
+   */
+  notConnected?: boolean;
 };
 
 export type Connector = {

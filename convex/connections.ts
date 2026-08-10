@@ -170,6 +170,8 @@ export const complete = internalMutation({
     userId: v.id("users"),
     provider: providerValidator,
     refreshToken: v.string(),
+    providerUserId: v.optional(v.string()),
+    botToken: v.optional(v.string()),
     accountLabel: v.optional(v.string()),
     scopes: v.array(v.string()),
   },
@@ -186,6 +188,8 @@ export const complete = internalMutation({
       userId: args.userId,
       provider: args.provider,
       refreshToken: args.refreshToken,
+      providerUserId: args.providerUserId,
+      botToken: args.botToken,
       accountLabel: args.accountLabel,
       scopes: args.scopes,
       connectedAt: Date.now(),
@@ -223,6 +227,56 @@ export const credential = internalQuery({
       .unique();
     if (!row || row.brokenAt !== undefined) return null;
     return { refreshToken: row.refreshToken, scopes: row.scopes };
+  },
+});
+
+/**
+ * Everything needed to DM one person on Slack: the bot token that can open the
+ * conversation, and their own `U…` to open it with. Internal — token material.
+ */
+export const slackDelivery = internalQuery({
+  args: { userId: v.id("users") },
+  returns: v.union(
+    v.object({ botToken: v.string(), providerUserId: v.string() }),
+    v.null(),
+  ),
+  handler: async (ctx, args) => {
+    const row = await ctx.db
+      .query("connections")
+      .withIndex("by_userId_and_provider", (q) =>
+        q.eq("userId", args.userId).eq("provider", "slack"),
+      )
+      .unique();
+    if (!row || row.brokenAt !== undefined) return null;
+    // A connection made before bot scopes existed has neither field. That is a
+    // reconnect, not an error — the caller degrades to "no Slack" and says so.
+    if (!row.botToken || !row.providerUserId) return null;
+    return { botToken: row.botToken, providerUserId: row.providerUserId };
+  },
+});
+
+/**
+ * Which of our accounts a Slack user id belongs to.
+ *
+ * This is how an inbound DM becomes an authenticated actor: the event carries
+ * a `U…`, and only the person who completed the OAuth handshake could have put
+ * that value in this table.
+ */
+export const bySlackUser = internalQuery({
+  args: { providerUserId: v.string() },
+  returns: v.union(
+    v.object({ userId: v.id("users"), botToken: v.union(v.string(), v.null()) }),
+    v.null(),
+  ),
+  handler: async (ctx, args) => {
+    const row = await ctx.db
+      .query("connections")
+      .withIndex("by_provider_and_providerUserId", (q) =>
+        q.eq("provider", "slack").eq("providerUserId", args.providerUserId),
+      )
+      .unique();
+    if (!row) return null;
+    return { userId: row.userId, botToken: row.botToken ?? null };
   },
 });
 

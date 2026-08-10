@@ -26,18 +26,46 @@ export function connectorFor(kind: ActionKind): Connector | null {
   return fallback.configured() ? fallback : null;
 }
 
-export function connectorStatus(): ConnectorsState {
+/** One row of `connections.mine`, narrowed to what the panel needs. */
+export type UserConnection = {
+  provider: "google" | "slack";
+  accountLabel?: string;
+  broken: boolean;
+  brokenReason?: string;
+};
+
+/** Which OAuth grant each surface actually goes out on. */
+const PROVIDER_FOR: Record<ActionKind, "google" | "slack"> = {
+  email: "google",
+  calendar: "google",
+  slack: "slack",
+};
+
+/**
+ * What this deployment can do, and what *you* can do — deliberately two
+ * different answers on the same row.
+ *
+ * `connections` is the viewer's own grants. Passing none says "nobody is
+ * asking", not "nothing is connected", so callers that have no viewer get
+ * `connected: false` everywhere rather than a cheerful default.
+ */
+export function connectorStatus(connections: UserConnection[] = []): ConnectorsState {
   const kinds: ActionKind[] = ["email", "slack", "calendar"];
   return {
     dryRun: DRY_RUN,
     connectors: kinds.map<ConnectorStatus>((kind) => {
       const active = connectorFor(kind);
       const native = NATIVE[kind];
+      const link = connections.find((c) => c.provider === PROVIDER_FOR[kind]);
       return {
         kind,
         id: active?.id ?? null,
         label: active?.label ?? `${native.id} · not configured`,
         configured: Boolean(active),
+        connected: Boolean(link && !link.broken),
+        account: link?.accountLabel,
+        broken: link?.broken || undefined,
+        brokenReason: link?.brokenReason,
         requires: native.requires,
         missing: native.requires.filter((v) => !process.env[v]),
       };

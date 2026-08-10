@@ -5,7 +5,8 @@ import { useEffect, useRef, useState } from "react";
 export const HELP = [
   "spawn <task>            dispatch an intern",
   "ask <question>          ask the brain directly (no intern)",
-  "capture <what you know> put a fact into the brain by hand",
+  "capture <what you know> put a fact into the brain by hand — nothing has to ask",
+  "                        the + panel top-right does the same with a kind and a link",
   "kill <id>               stop an intern",
   "",
   "outbox                  list drafts waiting for approval",

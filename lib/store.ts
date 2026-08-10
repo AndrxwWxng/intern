@@ -22,10 +22,10 @@ import type {
   Mode,
   ProposedAction,
   Question,
+  RoleId,
   SystemState,
 } from "./types";
 import { outgoing } from "./types";
-import { parseActionBlock } from "./action-block";
 import * as scout from "./scout";
 import {
   planSim,
@@ -41,6 +41,8 @@ import {
   execute,
 } from "./connectors";
 import * as brain from "./brain";
+import { notifyDone, notifyQuestion } from "./notify";
+import { DEFAULT_ROLE, getRole, pickRole } from "./roster";
 import * as trust from "./trust";
 
 const LOG_CAP = 1200;
@@ -408,24 +410,25 @@ let counter = store.interns.size;
 
 export function spawn(
   task: string,
-  opts: { ownerId: string; resumes?: string },
+  opts: { ownerId: string; role?: RoleId; resumes?: string },
 ): Intern {
   const n = ++counter;
   const id = `int-${n.toString(36).padStart(2, "0")}${Math.random()
     .toString(36)
     .slice(2, 4)}`;
+  const role = opts.role ?? pickRole(task);
   const intern: Intern = {
     id,
     ownerId: opts.ownerId,
     handle: id,
     task,
+    role,
     status: "queued",
     mode: store.system.reachable ? "live" : "sim",
     createdAt: Date.now(),
     resumes: opts.resumes,
     tools: [],
     toolCalls: 0,
-    toolErrors: 0,
     artifacts: [],
     sessionId: `cockpit-${id}`,
   };
@@ -439,21 +442,21 @@ export function spawn(
         label: id,
         kind: "intern",
         weight: 5,
-        detail: task.slice(0, 70),
+        detail: `${role} · ${task.slice(0, 70)}`,
       },
     ],
     [{ source: "brain", target: id, rel: "dispatched" }],
   );
 
   emit({ type: "intern", intern });
-  log(id, "sys", `spawned · ${task}`);
+  log(id, "sys", `spawned as ${role} · ${task}`);
   brain.note({
     kind: "spawn",
     actor: "you",
     internId: id,
     sourceId: null,
     ref: id,
-    detail: task.slice(0, 120),
+    detail: `${role}: ${task.slice(0, 120)}`,
   });
 
   store.queue.push(id);
@@ -510,17 +513,7 @@ async function run(intern: Intern) {
       intern.status = "done";
       intern.endedAt = Date.now();
       touch(intern);
-      // "finished" on its own reads as "worked". If steps failed along the way
-      // the intern still has an answer, but the person reading it deserves to
-      // know it was assembled over holes.
-      const failures = intern.toolErrors
-        ? ` · ${intern.toolErrors} tool call${intern.toolErrors === 1 ? "" : "s"} failed`
-        : "";
-      log(
-        intern.id,
-        intern.toolErrors ? "warn" : "ok",
-        `finished in ${elapsed(intern)}${failures}`,
-      );
+      log(intern.id, "ok", `finished in ${elapsed(intern)}`);
     }
   } catch (err) {
     if (ctl.signal.aborted) {
@@ -537,6 +530,43 @@ async function run(intern: Intern) {
     }
   } finally {
     store.controllers.delete(intern.id);
+    // Whatever happened, whoever asked for it hears about it. A long run is
+    // one you walked away from, so the cockpit is the wrong place to leave the
+    // only copy of the answer.
+    //
+    // Cancelled runs are skipped: you cancelled it, you already know.
+    if (intern.status !== "cancelled") void announce(intern);
+  }
+}
+
+/**
+ * DM the owner that their intern is done.
+ *
+ * Never throws and never awaited by the run: the work is finished and filed by
+ * this point, so a Slack outage must not turn a successful run into a failed
+ * one. It reports into the intern's own log either way, so a notification that
+ * didn't land is visible rather than silent.
+ */
+async function announce(intern: Intern): Promise<void> {
+  if (!intern.ownerId) return;
+  try {
+    const { delivered, detail } = await notifyDone({
+      userId: intern.ownerId,
+      internId: intern.id,
+      role: intern.role,
+      task: intern.task,
+      status: intern.status,
+      summary: intern.summary ?? intern.error,
+      artifacts: intern.artifacts.map((a) => a.label),
+      took: elapsed(intern),
+    });
+    log(
+      intern.id,
+      delivered ? "ok" : "warn",
+      delivered ? `result sent to slack · ${detail}` : `could not slack the result · ${detail}`,
+    );
+  } catch {
+    /* announcing is best-effort by design */
   }
 }
 
@@ -544,15 +574,15 @@ const elapsed = (i: Intern) =>
   `${(((i.endedAt ?? Date.now()) - (i.startedAt ?? i.createdAt)) / 1000).toFixed(1)}s`;
 
 /**
- * Everything the brain has learned about how work should be done, rendered for
- * the brief.
+ * Everything the brain has learned about how this role should work, rendered
+ * for the brief.
  *
  * This is the entire learning loop and it is deliberately this small: a person
  * corrects a draft, the correction becomes a fact, the next brief retrieves it,
  * behaviour changes. Nobody wrote a rule and there is no training job.
  */
 function recalled(intern: Intern): { text: string; facts: Fact[] } {
-  const preferences = brain.preferences(5);
+  const preferences = brain.preferencesFor(intern.role, 5);
   const context = brain.recall(intern.task, { limit: 4 }).filter(
     (f) => !preferences.some((p) => p.id === f.id),
   );
@@ -573,6 +603,8 @@ ${lines.join("\n")}
 
 const BRIEF = (intern: Intern, learned: string) =>
   `You are an intern working a long-running task for the team.
+
+${getRole(intern.role).charter}
 
 TASK: ${intern.task}
 ${learned}
@@ -607,9 +639,14 @@ someone ten seconds. Ask at most one per run, and only when you are genuinely
 blocked.`;
 
 async function runLive(intern: Intern, signal: AbortSignal) {
-  const out = scout.lanes((text) => log(intern.id, "out", text));
-  /** Everything the *top-level* agent said. Sub-agent chatter is not the answer. */
+  let buffer = "";
+  /** Everything the agent said, kept whole — the buffer is drained by logging. */
   let said = "";
+  const flush = () => {
+    const text = buffer.trim();
+    buffer = "";
+    if (text) log(intern.id, "out", text);
+  };
 
   const learned = recalled(intern);
   if (learned.facts.length) {
@@ -629,7 +666,7 @@ async function runLive(intern: Intern, signal: AbortSignal) {
     const kind = String(ev.event ?? "");
 
     if (kind.includes("ToolCallStarted") || kind === "tool_call_started") {
-      out.flush(ev);
+      flush();
       const name =
         ev.tool?.tool_name ?? ev.tools?.[0]?.tool_name ?? "tool";
       intern.toolCalls++;
@@ -646,13 +683,7 @@ async function runLive(intern: Intern, signal: AbortSignal) {
         typeof result === "string"
           ? result.replace(/\s+/g, " ").slice(0, 240)
           : "";
-      // A failed tool used to be logged at "ok" like any other, so the stream
-      // showed `web_search → Error: Timed out` behind a green tick. Whether a
-      // step worked is the one thing the line has to get right.
-      const failed =
-        ev.tool?.tool_call_error === true || /^Error:/.test(preview.trim());
-      if (failed) intern.toolErrors++;
-      log(intern.id, failed ? "err" : "ok", `${name} → ${preview || "ok"}`);
+      log(intern.id, "ok", `${name} → ${preview || "ok"}`);
       if (name.startsWith("update_")) {
         const artifact = {
           kind: name.includes("knowledge") ? ("wiki" as const) : ("note" as const),
@@ -671,16 +702,11 @@ async function runLive(intern: Intern, signal: AbortSignal) {
     // meant nothing was ever parsed out of it and nothing reached the brain.
     if (kind.includes("RunCompleted") || kind === "run_completed") {
       const content = typeof ev.content === "string" ? ev.content : "";
-      const lane = out.lane(ev);
       if (content) {
-        lane.text += content;
-        if (lane.main) said += content;
+        buffer += content;
+        said += content;
       }
-      out.flush(ev);
-      // Every context provider completes too, and each one carries its own
-      // answer. Taking them all meant the summary was whichever sub-agent
-      // happened to finish last rather than what the intern concluded.
-      if (!lane.main) continue;
+      flush();
       // Fall back to everything streamed: some runs deliver the answer as
       // deltas and complete with an empty payload.
       const final = (content || said).trim();
@@ -689,22 +715,21 @@ async function runLive(intern: Intern, signal: AbortSignal) {
     }
 
     if (typeof ev.content === "string" && ev.content) {
-      const lane = out.lane(ev);
-      lane.text += ev.content;
-      if (lane.main) said += ev.content;
+      buffer += ev.content;
+      said += ev.content;
       // Flush on sentence-ish boundaries so the terminal reads like a stream
       // of thoughts rather than one wall of text at the end.
-      if (lane.text.length > 160 || /[.\n]$/.test(lane.text)) out.flush(ev);
+      if (buffer.length > 160 || /[.\n]$/.test(buffer)) flush();
       continue;
     }
 
     if (kind.includes("RunError") || kind.includes("Error")) {
-      out.flushAll();
+      flush();
       throw new Error(String(ev.content ?? "scout run error"));
     }
   }
 
-  out.flushAll();
+  flush();
 
   if (intern.summary) {
     // A question outranks a proposal: an intern that asked and also drafted
@@ -739,7 +764,7 @@ async function runSim(intern: Intern, signal: AbortSignal) {
     );
   }
 
-  const question = simQuestion(intern.task);
+  const question = simQuestion(intern.task, intern.role);
   const steps = planSim(intern.task, intern.id);
   for (const step of steps) {
     await sleep(step.delay, signal);
@@ -769,7 +794,11 @@ async function runSim(intern: Intern, signal: AbortSignal) {
 
   const outbound = simOutboundDraft(intern.task);
   if (outbound) {
-    const proposed = proposeAction({ internId: intern.id, ...outbound });
+    const proposed = proposeAction({
+      internId: intern.id,
+      role: intern.role,
+      ...outbound,
+    });
     intern.artifacts.push({
       kind: "answer",
       label: `proposed email: ${proposed.draft.subject}`,
@@ -834,6 +863,7 @@ export function askQuestion(
     id,
     internId: intern.id,
     ownerId: intern.ownerId,
+    role: intern.role,
     question: question.slice(0, 500),
     context: context.slice(0, 1000),
     status: "open",
@@ -863,6 +893,28 @@ export function askQuestion(
     ],
     [{ source: intern.id, target: id, rel: "asks" }],
   );
+
+  // Go and find the person. Parked used to mean "stalled until somebody
+  // happened to open the cockpit"; this is what makes it mean "waiting on a
+  // reply". Deliberately not awaited — the intern has already stopped, and how
+  // long Slack takes is not the parked work's problem.
+  void notifyQuestion({
+    userId: intern.ownerId,
+    questionId: id,
+    internId: intern.id,
+    role: intern.role,
+    question: row.question,
+    context: row.context,
+  }).then((result) => {
+    log(
+      intern.id,
+      result.delivered ? "ok" : "warn",
+      result.delivered
+        ? `asked on slack · ${result.detail} — reply in the thread`
+        : `no slack DM (${result.detail}) · answer it in the cockpit`,
+    );
+  });
+
   return row;
 }
 
@@ -904,6 +956,7 @@ export function answerQuestion(
     title: question.question,
     body: answer,
     actor,
+    subject: question.role,
     tags: ["answered"],
     internId: question.internId,
   });
@@ -943,7 +996,7 @@ export function answerQuestion(
     touch(parked);
     resumed = spawn(
       `${parked.task}\n\nYou asked: ${question.question}\nThe answer is: ${answer}\nCarry on from there.`,
-      { ownerId: parked.ownerId, resumes: parked.id },
+      { ownerId: parked.ownerId, role: parked.role, resumes: parked.id },
     );
     question.resumedBy = resumed.id;
     graft([], [{ source: id, target: resumed.id, rel: "resumed" }]);
@@ -1014,7 +1067,17 @@ export async function capture(input: {
   url?: string;
   tags?: string[];
   kind?: Fact["kind"];
-  /** Also put an intern on writing it into the wiki properly. */
+  /** What it is about — for a preference, the role it binds to. */
+  subject?: string;
+  /** Graph node ids to attach it to, so it lands wired in rather than loose. */
+  links?: string[];
+  /**
+   * A person typed this, rather than a client forwarding something it read.
+   * Worth more than an overheard claim, so it starts at the confidence an
+   * answered question gets — see `brain.learn`.
+   */
+  stated?: boolean;
+  /** Also put an archivist on writing it into the wiki properly. */
   file?: boolean;
   /**
    * Whoever captured. The fact itself lands in the shared brain — that is the
@@ -1025,7 +1088,12 @@ export async function capture(input: {
 }): Promise<{ fact: Fact; fresh: boolean; merged: boolean; intern: Intern | null }> {
   await brain.ready();
 
-  const hint = { kind: input.kind ?? ("note" as const), tags: input.tags };
+  const hint = {
+    kind: input.kind ?? ("note" as const),
+    tags: input.tags,
+    subject: input.subject,
+    links: input.links?.length ? input.links : undefined,
+  };
   const { observation, fresh } = brain.record({
     sourceId: input.sourceId ?? "capture",
     externalId: input.externalId,
@@ -1036,6 +1104,7 @@ export async function capture(input: {
     hint,
   });
   const { fact, merged } = brain.promote(observation, hint);
+  if (input.stated) fact.confidence = Math.max(fact.confidence, 0.9);
 
   log(
     null,
@@ -1053,7 +1122,7 @@ export async function capture(input: {
       `File this into the knowledge wiki and link it to what already exists.\n\nTITLE: ${input.title}\n\n${input.body}${
         input.url ? `\n\nSOURCE: ${input.url}` : ""
       }`,
-      { ownerId: input.ownerId },
+      { ownerId: input.ownerId, role: "archivist" },
     );
   }
 
@@ -1099,8 +1168,12 @@ export async function ask(question: string, ownerId: string): Promise<void> {
     return;
   }
 
-  // Same interleaving as a live intern run — one lane per run, not one buffer.
-  const out = scout.lanes((text) => log(null, "out", text));
+  let buffer = "";
+  const flush = () => {
+    const t = buffer.trim();
+    buffer = "";
+    if (t) say("out", t);
+  };
 
   try {
     for await (const ev of scout.runStream(question, {
@@ -1108,15 +1181,14 @@ export async function ask(question: string, ownerId: string): Promise<void> {
     })) {
       const kind = String(ev.event ?? "");
       if (kind.includes("ToolCallStarted")) {
-        out.flush(ev);
-        log(null, "tool", `${ev.tool?.tool_name ?? "tool"}(…)`);
+        flush();
+        say("tool", `${ev.tool?.tool_name ?? "tool"}(…)`);
       } else if (typeof ev.content === "string" && ev.content) {
-        const lane = out.lane(ev);
-        lane.text += ev.content;
-        if (lane.text.length > 160 || /[.\n]$/.test(lane.text)) out.flush(ev);
+        buffer += ev.content;
+        if (buffer.length > 160 || /[.\n]$/.test(buffer)) flush();
       }
     }
-    out.flushAll();
+    flush();
   } catch (err) {
     say("err", err instanceof Error ? err.message : String(err));
   }
@@ -1154,6 +1226,7 @@ export function proposeAction(input: {
   internId: string | null;
   /** Explicit only for drafts with no intern behind them; otherwise inherited. */
   ownerId?: string | null;
+  role?: RoleId;
   kind: ActionKind;
   title: string;
   draft: Draft;
@@ -1163,6 +1236,10 @@ export function proposeAction(input: {
   const id = `act-${(++actionCounter).toString(36).padStart(2, "0")}${Math.random()
     .toString(36)
     .slice(2, 4)}`;
+  const role =
+    input.role ??
+    (input.internId ? store.interns.get(input.internId)?.role : undefined) ??
+    DEFAULT_ROLE;
   const action: ProposedAction = {
     id,
     internId: input.internId,
@@ -1170,6 +1247,7 @@ export function proposeAction(input: {
       input.ownerId !== undefined
         ? input.ownerId
         : (input.internId ? store.interns.get(input.internId)?.ownerId : null) ?? null,
+    role,
     kind: input.kind,
     status: "pending",
     title: input.title,
@@ -1191,7 +1269,7 @@ export function proposeAction(input: {
     internId: input.internId,
     sourceId: null,
     ref: id,
-    detail: `proposed ${input.kind}: ${input.draft.subject}`,
+    detail: `${role} proposed ${input.kind}: ${input.draft.subject}`,
   });
 
   const nodes: GraphNode[] = [
@@ -1209,12 +1287,12 @@ export function proposeAction(input: {
   }
   graft(nodes, edges);
 
-  // This kind of work has already been judged often enough that a person said
-  // to stop reviewing it. Honouring that is the whole point of graduation — but
-  // it happens loudly, in the same stream as everything else, so nobody
-  // discovers it after the fact.
-  if (trust.isGraduated(input.kind)) {
-    log(input.internId, "sys", `${input.kind} is graduated · ${id} goes without review`);
+  // A graduated role has already been judged on this kind of work often enough
+  // that a person said to stop reviewing it. Honouring that is the whole point
+  // of graduation — but it happens loudly, in the same stream as everything
+  // else, so nobody discovers it after the fact.
+  if (trust.isGraduated(role)) {
+    log(input.internId, "sys", `${role} is graduated · ${id} goes without review`);
     void approveAndSend(id, "graduated");
   }
   return action;
@@ -1301,7 +1379,7 @@ export function approveAction(
   );
 
   // Graduated work is not supervised, so it is not evidence about supervision.
-  // Counting it would let the rate drift up on decisions nobody made.
+  // Counting it would let a role's rate drift up on decisions nobody made.
   if (via !== "graduated") {
     recordDecision(action, edited.length ? "edited" : "unedited");
   }
@@ -1344,36 +1422,36 @@ export function rejectAction(
   const fact = brain.learn({
     kind: "correction",
     title: `do not send: ${action.draft.subject}`,
-    body: `An intern drafted a ${action.kind} to ${action.draft.to.join(", ")} and a person rejected it.\n\nReason given: ${reason}\n\nWhat was drafted:\n${action.draft.body}`,
-    subject: action.kind,
+    body: `A ${action.role} drafted a ${action.kind} to ${action.draft.to.join(", ")} and a person rejected it.\n\nReason given: ${reason}\n\nWhat was drafted:\n${action.draft.body}`,
+    subject: action.role,
     tags: ["rejected", action.kind],
     internId: action.internId,
   });
-  log(action.internId, "sys", `filed the reason as ${fact.id} · the next intern reads it first`);
+  log(action.internId, "sys", `filed the reason as ${fact.id} · the next ${action.role} reads it first`);
   emit({ type: "brain", brain: brain.stats() });
   return action;
 }
 
-/** Fold the decision into this kind's record, and say so if a line was crossed. */
+/** Fold the decision into the role's record, and say so if a line was crossed. */
 function recordDecision(
   action: ProposedAction,
   outcome: "unedited" | "edited" | "rejected",
 ) {
   const { trust: record, proposed, revoked } = trust.record(
-    action.kind,
+    action.role,
     action.id,
     outcome,
   );
   emit({ type: "trust", trust: trust.all() });
 
   if (revoked) {
-    log(null, "warn", `${action.kind} un-graduated · back to supervised on every draft`);
+    log(null, "warn", `${action.role} un-graduated · back to supervised on every draft`);
   }
   if (proposed) {
     log(
       null,
       "ok",
-      `${action.kind} is ready to graduate · ${record.unedited} of ${record.decisions} accepted unedited · run "graduate ${action.kind}" to confirm`,
+      `${action.role} is ready to graduate · ${Math.round(record.rate * 100)}% accepted unedited over ${record.decisions} · run "graduate ${action.role}" to confirm`,
     );
   }
 }
@@ -1392,9 +1470,9 @@ function learnFromEdit(
 ) {
   const fact = brain.learn({
     kind: "preference",
-    title: `${action.kind}: ${edited.join(" and ")} rewritten before sending`,
+    title: `${action.role}: ${edited.join(" and ")} rewritten before sending`,
     body: [
-      `An intern drafted a ${action.kind}; a person rewrote it before approving.`,
+      `A ${action.role} drafted a ${action.kind}; a person rewrote it before approving.`,
       "",
       ...edited.flatMap((field) => [
         `${String(field).toUpperCase()} — proposed:`,
@@ -1405,14 +1483,14 @@ function learnFromEdit(
       ]),
       "Write it the accepted way next time.",
     ].join("\n"),
-    subject: action.kind,
+    subject: action.role,
     tags: ["voice", action.kind],
     internId: action.internId,
   });
   log(
     action.internId,
     "sys",
-    `learned ${fact.id} from your edit · every intern from now on starts with it`,
+    `learned ${fact.id} from your edit · every ${action.role} from now on starts with it`,
   );
   emit({ type: "brain", brain: brain.stats() });
 }
@@ -1421,15 +1499,15 @@ function learnFromEdit(
 // Graduation
 // ---------------------------------------------------------------------------
 
-export function graduateKind(kind: ActionKind, confirmed: boolean) {
-  const record = trust.graduate(kind, confirmed);
+export function graduateRole(role: RoleId, confirmed: boolean) {
+  const record = trust.graduate(role, confirmed);
   emit({ type: "trust", trust: trust.all() });
   log(
     null,
     confirmed ? "ok" : "sys",
     confirmed
-      ? `${kind} graduated · those drafts now go without review, and one rejection takes it back`
-      : `${kind} stays supervised`,
+      ? `${role} graduated · its drafts now go without review, and one rejection takes it back`
+      : `${role} stays supervised`,
   );
   return record;
 }
@@ -1485,19 +1563,40 @@ export function parseProposedAction(
   report: string,
   intern: Intern,
 ): ProposedAction | null {
-  const parsed = parseActionBlock(report);
-  if (!parsed) return null;
-
-  // An unusable block used to return null with nothing said, so a run that
-  // drafted a Slack post and had it dropped over a field name looked exactly
-  // like one that decided there was nothing to send — right down to "finished"
-  // in the stream. Whatever else happens, this gets said out loud.
-  if ("error" in parsed) {
-    log(intern.id, "err", `${parsed.error} — nothing was queued to send`);
+  const match = report.match(/```action\s*([\s\S]*?)```/);
+  if (!match) return null;
+  try {
+    const raw = JSON.parse(match[1].trim()) as {
+      kind?: string;
+      to?: string[] | string;
+      cc?: string[] | string;
+      subject?: string;
+      body?: string;
+      rationale?: string;
+      sources?: string[];
+    };
+    const to = Array.isArray(raw.to) ? raw.to : raw.to ? [raw.to] : [];
+    if (!to.length || !raw.subject || !raw.body) return null;
+    const kind: ActionKind =
+      raw.kind === "slack" || raw.kind === "calendar" ? raw.kind : "email";
+    return proposeAction({
+      internId: intern.id,
+      role: intern.role,
+      kind,
+      title: `${kind} to ${to.join(", ")} — ${raw.subject}`,
+      draft: {
+        to,
+        cc: Array.isArray(raw.cc) ? raw.cc : raw.cc ? [raw.cc] : undefined,
+        subject: raw.subject,
+        body: raw.body,
+      },
+      rationale: raw.rationale ?? "proposed by the intern from its findings",
+      sources: raw.sources ?? [],
+    });
+  } catch {
+    log(intern.id, "warn", "final report had an action block that wasn't valid JSON");
     return null;
   }
-
-  return proposeAction({ internId: intern.id, ...parsed });
 }
 
 // ---------------------------------------------------------------------------
@@ -1524,10 +1623,30 @@ export async function executeAction(id: string): Promise<ProposedAction | null> 
 
   log(action.internId, "tool", `${connector.id}.send(${id})${DRY_RUN ? " · DRY RUN" : ""}`);
   const result = await execute(action);
+
+  // Nothing was attempted, because the approver has no account linked for this
+  // surface. The draft stays `approved` and keeps its place in the outbox: it
+  // is not sent, and it is not broken either. Recording "sent" here is exactly
+  // the lie this path used to tell, and "failed" would be a different one.
+  if (result.notConnected) {
+    action.result = result.detail;
+    store.outbox.set(id, action);
+    emit({ type: "action", action });
+    log(action.internId, "warn", `${id} not sent · ${result.detail}`);
+    return action;
+  }
+
   return recordActionResult(id, result.ok ? "sent" : "failed", result.detail);
 }
 
-/** Approve and, if we hold the credentials, send it ourselves. */
+/**
+ * Approve and, if the approver's own account can carry it, send it.
+ *
+ * `dispatched` means the thing actually left — not that a connector existed
+ * and we had a go. The cockpit shows a success line off this flag, so anything
+ * looser turns "we tried" into "it's sent" on screen, which is the whole class
+ * of bug this path had.
+ */
 export async function approveAndSend(
   id: string,
   via: Decision,
@@ -1541,7 +1660,8 @@ export async function approveAndSend(
   if (!connector) return { action: approved, dispatched: false };
 
   const settled = await executeAction(id);
-  return { action: settled ?? approved, dispatched: true };
+  const action = settled ?? approved;
+  return { action, dispatched: action.status === "sent" };
 }
 
 export { connectorStatus };
