@@ -624,6 +624,17 @@ fenced block, using query_voice first so the draft is in the house style:
  "rationale":"why this should go out","sources":["what you based it on"]}
 \`\`\`
 
+For Slack the recipient still goes in "to", as the channel id, and there is no
+subject — a Slack post does not have one:
+
+\`\`\`action
+{"kind":"slack","to":["C0BP0HJC6DU"],"body":"…",
+ "rationale":"why this should go out","sources":["what you based it on"]}
+\`\`\`
+
+Always "to". Not "channel", not "channel_id" — a block without "to" is dropped
+and the work is wasted.
+
 A human approves it before anything is sent.
 
 If something the task left out cannot be resolved from the brain — who someone

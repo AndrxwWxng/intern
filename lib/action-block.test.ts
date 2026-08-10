@@ -78,6 +78,29 @@ test("a block is found however far into the report it sits", () => {
   assert.equal(parseActionBlock(report.slice(0, 600)), null);
 });
 
+test("every name a model has actually used for the channel is accepted", () => {
+  // Three separate real runs produced three different spellings. The brief now
+  // shows a Slack example so `to` is the likely one, but a wrong guess costs a
+  // whole run, so all of them are taken.
+  for (const field of ["to", "channel", "channels", "channel_id", "channelId"]) {
+    const parsed = parseActionBlock(
+      `\`\`\`action\n{"kind":"slack","${field}":"C0BP0HJC6DU","body":"Hi"}\n\`\`\``,
+    );
+    assert.ok(parsed && !("error" in parsed), `${field} should be accepted`);
+    assert.deepEqual(parsed.draft.to, ["C0BP0HJC6DU"], `${field} should map to to`);
+  }
+});
+
+test("the missing-field message reads as English", () => {
+  const noRecipient = parseActionBlock('```action\n{"kind":"slack","body":"hi"}\n```');
+  assert.ok(noRecipient && "error" in noRecipient);
+  assert.equal(noRecipient.error, "action block had no recipient");
+
+  const neither = parseActionBlock('```action\n{"kind":"slack"}\n```');
+  assert.ok(neither && "error" in neither);
+  assert.equal(neither.error, "action block had no recipient and no body");
+});
+
 test("an unknown kind falls back to email rather than being dropped", () => {
   const parsed = parseActionBlock(
     '```action\n{"kind":"carrier-pigeon","to":"a@b.co","body":"hi"}\n```',
