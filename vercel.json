@@ -1,14 +1,18 @@
 {
-    "experimentalServices": {
+    "services": {
         "web": {
             "root": ".",
-            "mountPath": "/",
             "framework": "nextjs",
             "buildCommand": "npm ci && npm run build"
         },
         "scout": {
             "root": "scout",
-            "mountPath": "/api/scout"
+            "framework": "fastapi",
+            "entrypoint": "app.main:app"
         }
-    }
+    },
+    "rewrites": [
+        { "source": "/api/scout/:path*", "destination": { "service": "scout" } },
+        { "source": "/:path*", "destination": { "service": "web" } }
+    ]
 }
