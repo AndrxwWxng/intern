@@ -41,6 +41,7 @@ import {
   execute,
 } from "./connectors";
 import * as brain from "./brain";
+import { notifyDone, notifyQuestion } from "./notify";
 import * as trust from "./trust";
 
 const LOG_CAP = 1200;
@@ -515,17 +516,7 @@ async function run(intern: Intern) {
       intern.status = "done";
       intern.endedAt = Date.now();
       touch(intern);
-      // "finished" on its own reads as "worked". If steps failed along the way
-      // the intern still has an answer, but the person reading it deserves to
-      // know it was assembled over holes.
-      const failures = intern.toolErrors
-        ? ` · ${intern.toolErrors} tool call${intern.toolErrors === 1 ? "" : "s"} failed`
-        : "";
-      log(
-        intern.id,
-        intern.toolErrors ? "warn" : "ok",
-        `finished in ${elapsed(intern)}${failures}`,
-      );
+      log(intern.id, "ok", `finished in ${elapsed(intern)}`);
     }
   } catch (err) {
     if (ctl.signal.aborted) {
@@ -542,6 +533,42 @@ async function run(intern: Intern) {
     }
   } finally {
     store.controllers.delete(intern.id);
+    // Whatever happened, whoever asked for it hears about it. A long run is
+    // one you walked away from, so the cockpit is the wrong place to leave the
+    // only copy of the answer.
+    //
+    // Cancelled runs are skipped: you cancelled it, you already know.
+    if (intern.status !== "cancelled") void announce(intern);
+  }
+}
+
+/**
+ * DM the owner that their intern is done.
+ *
+ * Never throws and never awaited by the run: the work is finished and filed by
+ * this point, so a Slack outage must not turn a successful run into a failed
+ * one. It reports into the intern's own log either way, so a notification that
+ * didn't land is visible rather than silent.
+ */
+async function announce(intern: Intern): Promise<void> {
+  if (!intern.ownerId) return;
+  try {
+    const { delivered, detail } = await notifyDone({
+      userId: intern.ownerId,
+      internId: intern.id,
+      task: intern.task,
+      status: intern.status,
+      summary: intern.summary ?? intern.error,
+      artifacts: intern.artifacts.map((a) => a.label),
+      took: elapsed(intern),
+    });
+    log(
+      intern.id,
+      delivered ? "ok" : "warn",
+      delivered ? `result sent to slack · ${detail}` : `could not slack the result · ${detail}`,
+    );
+  } catch {
+    /* announcing is best-effort by design */
   }
 }
 
@@ -549,8 +576,8 @@ const elapsed = (i: Intern) =>
   `${(((i.endedAt ?? Date.now()) - (i.startedAt ?? i.createdAt)) / 1000).toFixed(1)}s`;
 
 /**
- * Everything the brain has learned about how work should be done, rendered for
- * the brief.
+ * Everything the brain has learned about how this role should work, rendered
+ * for the brief.
  *
  * This is the entire learning loop and it is deliberately this small: a person
  * corrects a draft, the correction becomes a fact, the next brief retrieves it,
@@ -788,7 +815,10 @@ async function runSim(intern: Intern, signal: AbortSignal) {
 
   const outbound = simOutboundDraft(intern.task);
   if (outbound) {
-    const proposed = proposeAction({ internId: intern.id, ...outbound });
+    const proposed = proposeAction({
+      internId: intern.id,
+      ...outbound,
+    });
     intern.artifacts.push({
       kind: "answer",
       label: `proposed email: ${proposed.draft.subject}`,
@@ -882,6 +912,27 @@ export function askQuestion(
     ],
     [{ source: intern.id, target: id, rel: "asks" }],
   );
+
+  // Go and find the person. Parked used to mean "stalled until somebody
+  // happened to open the cockpit"; this is what makes it mean "waiting on a
+  // reply". Deliberately not awaited — the intern has already stopped, and how
+  // long Slack takes is not the parked work's problem.
+  void notifyQuestion({
+    userId: intern.ownerId,
+    questionId: id,
+    internId: intern.id,
+    question: row.question,
+    context: row.context,
+  }).then((result) => {
+    log(
+      intern.id,
+      result.delivered ? "ok" : "warn",
+      result.delivered
+        ? `asked on slack · ${result.detail} — reply in the thread`
+        : `no slack DM (${result.detail}) · answer it in the cockpit`,
+    );
+  });
+
   return row;
 }
 
@@ -1033,7 +1084,17 @@ export async function capture(input: {
   url?: string;
   tags?: string[];
   kind?: Fact["kind"];
-  /** Also put an intern on writing it into the wiki properly. */
+  /** What it is about — for a preference, the role it binds to. */
+  subject?: string;
+  /** Graph node ids to attach it to, so it lands wired in rather than loose. */
+  links?: string[];
+  /**
+   * A person typed this, rather than a client forwarding something it read.
+   * Worth more than an overheard claim, so it starts at the confidence an
+   * answered question gets — see `brain.learn`.
+   */
+  stated?: boolean;
+  /** Also put an archivist on writing it into the wiki properly. */
   file?: boolean;
   /**
    * Whoever captured. The fact itself lands in the shared brain — that is the
@@ -1044,7 +1105,12 @@ export async function capture(input: {
 }): Promise<{ fact: Fact; fresh: boolean; merged: boolean; intern: Intern | null }> {
   await brain.ready();
 
-  const hint = { kind: input.kind ?? ("note" as const), tags: input.tags };
+  const hint = {
+    kind: input.kind ?? ("note" as const),
+    tags: input.tags,
+    subject: input.subject,
+    links: input.links?.length ? input.links : undefined,
+  };
   const { observation, fresh } = brain.record({
     sourceId: input.sourceId ?? "capture",
     externalId: input.externalId,
@@ -1055,6 +1121,7 @@ export async function capture(input: {
     hint,
   });
   const { fact, merged } = brain.promote(observation, hint);
+  if (input.stated) fact.confidence = Math.max(fact.confidence, 0.9);
 
   log(
     null,
@@ -1228,10 +1295,10 @@ export function proposeAction(input: {
   }
   graft(nodes, edges);
 
-  // This kind of work has already been judged often enough that a person said
-  // to stop reviewing it. Honouring that is the whole point of graduation — but
-  // it happens loudly, in the same stream as everything else, so nobody
-  // discovers it after the fact.
+  // A graduated role has already been judged on this kind of work often enough
+  // that a person said to stop reviewing it. Honouring that is the whole point
+  // of graduation — but it happens loudly, in the same stream as everything
+  // else, so nobody discovers it after the fact.
   if (trust.isGraduated(input.kind)) {
     log(input.internId, "sys", `${input.kind} is graduated · ${id} goes without review`);
     void approveAndSend(id, "graduated");
@@ -1320,7 +1387,7 @@ export function approveAction(
   );
 
   // Graduated work is not supervised, so it is not evidence about supervision.
-  // Counting it would let the rate drift up on decisions nobody made.
+  // Counting it would let a role's rate drift up on decisions nobody made.
   if (via !== "graduated") {
     recordDecision(action, edited.length ? "edited" : "unedited");
   }
@@ -1373,7 +1440,7 @@ export function rejectAction(
   return action;
 }
 
-/** Fold the decision into this kind's record, and say so if a line was crossed. */
+/** Fold the decision into the role's record, and say so if a line was crossed. */
 function recordDecision(
   action: ProposedAction,
   outcome: "unedited" | "edited" | "rejected",
@@ -1543,10 +1610,30 @@ export async function executeAction(id: string): Promise<ProposedAction | null> 
 
   log(action.internId, "tool", `${connector.id}.send(${id})${DRY_RUN ? " · DRY RUN" : ""}`);
   const result = await execute(action);
+
+  // Nothing was attempted, because the approver has no account linked for this
+  // surface. The draft stays `approved` and keeps its place in the outbox: it
+  // is not sent, and it is not broken either. Recording "sent" here is exactly
+  // the lie this path used to tell, and "failed" would be a different one.
+  if (result.notConnected) {
+    action.result = result.detail;
+    store.outbox.set(id, action);
+    emit({ type: "action", action });
+    log(action.internId, "warn", `${id} not sent · ${result.detail}`);
+    return action;
+  }
+
   return recordActionResult(id, result.ok ? "sent" : "failed", result.detail);
 }
 
-/** Approve and, if we hold the credentials, send it ourselves. */
+/**
+ * Approve and, if the approver's own account can carry it, send it.
+ *
+ * `dispatched` means the thing actually left — not that a connector existed
+ * and we had a go. The cockpit shows a success line off this flag, so anything
+ * looser turns "we tried" into "it's sent" on screen, which is the whole class
+ * of bug this path had.
+ */
 export async function approveAndSend(
   id: string,
   via: Decision,
@@ -1560,7 +1647,8 @@ export async function approveAndSend(
   if (!connector) return { action: approved, dispatched: false };
 
   const settled = await executeAction(id);
-  return { action: settled ?? approved, dispatched: true };
+  const action = settled ?? approved;
+  return { action, dispatched: action.status === "sent" };
 }
 
 export { connectorStatus };

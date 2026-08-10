@@ -37,7 +37,29 @@ export type ProviderConfig = {
   tokenFrom: (token: TokenResponse) => string | undefined;
   /** Pull a human label — which account this actually is. */
   labelFrom?: (token: TokenResponse) => string | undefined;
+  /**
+   * The provider's own id for this person, when we need to address them there
+   * rather than just act as them. Slack's `U…`, so an intern can open a DM.
+   */
+  providerUserIdFrom?: (token: TokenResponse) => string | undefined;
+  /**
+   * A workspace-level token, where the provider issues one alongside the user
+   * grant. Only Slack does: a bot is the only identity that can *receive* a
+   * reply, so the ask-and-answer loop needs one even though every outbound
+   * draft still goes as the person.
+   */
+  botTokenFrom?: (token: TokenResponse) => string | undefined;
+  /** Bot-level scopes, requested under `scope` beside the user grant. */
+  botScopes?: string[];
 };
+
+/** Read `authed_user.<field>` out of Slack's oauth.v2.access response. */
+function authedUser(token: TokenResponse, field: string): string | undefined {
+  const authed = token.authed_user;
+  if (!authed || typeof authed !== "object") return undefined;
+  const value = (authed as Record<string, unknown>)[field];
+  return typeof value === "string" ? value : undefined;
+}
 
 /** base64url → string, without Node's Buffer. */
 function decodeSegment(segment: string): string {
@@ -88,20 +110,21 @@ export const PROVIDERS: Record<ProviderId, ProviderConfig> = {
     tokenUrl: "https://slack.com/api/oauth.v2.access",
     // Posting *as the person* needs a user token, which Slack grants under
     // user_scope. A bot token would post as the app, which is the thing
-    // per-user auth exists to avoid.
+    // per-user auth exists to avoid — for outbound drafts.
     scopes: ["chat:write", "users:read"],
     scopeParam: "user_scope",
+    // The ask-and-answer loop is the exception, and it is not a preference:
+    // Slack only delivers events to a bot, so a user token can send a question
+    // but can never hear the answer. `im:write` opens the DM, `im:history`
+    // lets the Events API deliver what you type back into it.
+    botScopes: ["chat:write", "im:write", "im:history"],
     clientIdVar: "SLACK_CLIENT_ID",
     clientSecretVar: "SLACK_CLIENT_SECRET",
     refreshable: false,
-    tokenFrom: (token) => {
-      const authed = token.authed_user;
-      if (authed && typeof authed === "object" && "access_token" in authed) {
-        const value = (authed as { access_token?: unknown }).access_token;
-        return typeof value === "string" ? value : undefined;
-      }
-      return undefined;
-    },
+    tokenFrom: (token) => authedUser(token, "access_token"),
+    providerUserIdFrom: (token) => authedUser(token, "id"),
+    botTokenFrom: (token) =>
+      typeof token.access_token === "string" ? token.access_token : undefined,
     labelFrom: (token) => {
       const team = token.team;
       if (team && typeof team === "object" && "name" in team) {

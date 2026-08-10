@@ -1,7 +1,7 @@
 "use client";
 
 import { useAuthActions, useAuthToken } from "@convex-dev/auth/react";
-import { useQuery } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import BrainGraph from "./BrainGraph";
@@ -10,12 +10,14 @@ import CommandBar, { HELP } from "./CommandBar";
 import InternRail from "./InternRail";
 import Outbox, { type Decision } from "./Outbox";
 import Questions from "./Questions";
+import Teach, { type TeachInput } from "./Teach";
 import Terminal from "./Terminal";
 import type {
   BrainStats,
   CockpitEvent,
   Graph,
   GraphNode,
+  ActionKind,
   Intern,
   LogLevel,
   LogLine,
@@ -23,7 +25,6 @@ import type {
   NodeKind,
   ProposedAction,
   Question,
-  ActionKind,
   SystemState,
   TrustRecord,
 } from "@/lib/types";
@@ -56,6 +57,7 @@ export default function Cockpit() {
   const [connectors, setConnectors] = useState<ConnectorsState | null>(null);
   const [connected, setConnected] = useState(false);
   const token = useAuthToken();
+  const startConnection = useMutation(api.connections.start);
   const convexGraph = useQuery(api.brain.graph, {});
   const convexOutbox = useQuery(api.outbox.list, {});
 
@@ -348,9 +350,20 @@ export default function Cockpit() {
         echo("err", `could not ${decision.decision} ${id}`);
         return;
       }
-      const data = (await res.json()) as { dispatched?: boolean };
+      const data = (await res.json()) as {
+        dispatched?: boolean;
+        action?: { result?: string };
+      };
       if (decision.decision === "approve" && !data.dispatched) {
-        echo("warn", `${id} approved — no connector wired, waiting on an external sender`);
+        // The server knows *why* it didn't go — usually that this person has
+        // no account linked for that surface. Repeating a guess about missing
+        // connectors on top of it is how "approved" got read as "sent".
+        echo(
+          "warn",
+          data.action?.result
+            ? `${id} approved but NOT sent · ${data.action.result}`
+            : `${id} approved — no connector wired, waiting on an external sender`,
+        );
       }
     },
     [echo, authFetch],
@@ -380,6 +393,39 @@ export default function Cockpit() {
     [echo, authFetch],
   );
 
+  /**
+   * Start an OAuth handshake for a surface that isn't connected yet.
+   *
+   * The state row is minted by an authenticated mutation, so the browser never
+   * has to be trusted about who is connecting — by the time the provider
+   * redirects back, the user is already bound to that state string. We only
+   * carry the opaque state to `/oauth/start`, which holds the client id.
+   */
+  const connect = useCallback(
+    async (kind: ActionKind) => {
+      const provider = kind === "slack" ? "slack" : "google";
+      const site = process.env.NEXT_PUBLIC_CONVEX_SITE_URL;
+      if (!site) {
+        echo("err", "NEXT_PUBLIC_CONVEX_SITE_URL unset — cannot start the handshake");
+        return;
+      }
+      try {
+        const state = await startConnection({
+          provider,
+          redirectTo: window.location.href,
+        });
+        // Full page navigation, not the router: this leaves the app entirely
+        // for Convex and then the provider's consent screen. The lint rule
+        // below is about internal routes, which this deliberately is not.
+        // eslint-disable-next-line @next/next/no-location-assign-relative-destination
+        window.location.href = `${site}/oauth/start?provider=${provider}&state=${state}`;
+      } catch (err) {
+        echo("err", err instanceof Error ? err.message : `could not connect ${provider}`);
+      }
+    },
+    [echo, startConnection],
+  );
+
   const graduate = useCallback(
     async (kind: ActionKind, confirmed: boolean) => {
       const res = await authFetch("/api/trust", {
@@ -402,9 +448,44 @@ export default function Cockpit() {
           source: "cockpit",
           title: head.slice(0, 120),
           body: rest.join(" ").trim() || text,
+          stated: true,
         }),
       });
       if (!res.ok) echo("err", "capture failed");
+    },
+    [echo, authFetch],
+  );
+
+  /**
+   * File a fact nobody was asked for.
+   *
+   * Same route the `capture` verb uses, with the two things the verb has no
+   * grammar for: what kind of fact it is, and the node it hangs off. Resolves
+   * false when nothing landed, so the panel can keep the text rather than
+   * clearing a box the person would have to retype.
+   */
+  const teach = useCallback(
+    async (input: TeachInput) => {
+      const [head, ...rest] = input.text.split(/\n|(?<=[.!?])\s+/);
+      const res = await authFetch("/api/capture", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source: "cockpit",
+          title: head.slice(0, 120),
+          body: rest.join(" ").trim() || input.text,
+          kind: input.kind,
+          tags: input.tags,
+          subject: input.subject,
+          links: input.links,
+          stated: true,
+        }),
+      });
+      if (!res.ok) {
+        echo("err", "could not file that");
+        return false;
+      }
+      return true;
     },
     [echo, authFetch],
   );
@@ -607,6 +688,7 @@ export default function Cockpit() {
         <BrainRail
           system={system}
           connectors={connectors}
+          onConnect={connect}
           trust={trust}
           brain={brain}
           onGraduate={graduate}
@@ -682,6 +764,7 @@ export default function Cockpit() {
         </main>
 
         <aside className="flex min-h-0 w-[268px] shrink-0 flex-col border-l border-line">
+          <Teach selected={selected} onTeach={teach} />
           <Questions
             questions={questions}
             onAnswer={answer}

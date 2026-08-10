@@ -22,6 +22,8 @@ const HINT = v.object({
   ),
   tags: v.optional(v.array(v.string())),
   subject: v.optional(v.string()),
+  /** Graph nodes a person attached this to by hand. Replayed, so it sticks. */
+  links: v.optional(v.array(v.string())),
 });
 
 /**
