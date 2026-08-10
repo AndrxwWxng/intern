@@ -1,18 +1,1 @@
-{
-    "services": {
-        "web": {
-            "root": ".",
-            "framework": "nextjs",
-            "buildCommand": "npm ci && npm run build"
-        },
-        "scout": {
-            "root": "scout",
-            "framework": "fastapi",
-            "entrypoint": "app.main:app"
-        }
-    },
-    "rewrites": [
-        { "source": "/api/scout/:path*", "destination": { "service": "scout" } },
-        { "source": "/:path*", "destination": { "service": "web" } }
-    ]
-}
+{}
