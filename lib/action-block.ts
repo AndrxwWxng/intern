@@ -61,13 +61,25 @@ export function parseActionBlock(
   const kind: ActionKind =
     raw.kind === "slack" || raw.kind === "calendar" ? raw.kind : "email";
 
-  // `to` for email, `channel`/`channels` for Slack — same field, three names.
-  const to = [...list(raw.to), ...list(raw.channel), ...list(raw.channels)];
+  // One field, many names. `to` for email; for Slack the model reaches for
+  // whatever Slack itself calls the thing, and has so far produced `channel`,
+  // `channels` and `channel_id` on three separate runs. Guessing wrong costs a
+  // whole run, so take all of them rather than teaching each one in turn.
+  const to = [
+    ...list(raw.to),
+    ...list(raw.channel),
+    ...list(raw.channels),
+    ...list(raw.channel_id),
+    ...list(raw.channelId),
+    ...list(raw.conversation_id),
+  ];
   const body = text(raw.body);
   const subject = text(raw.subject);
 
-  const missing = [!to.length && "a recipient", !body && "a body"].filter(Boolean);
-  if (missing.length) return { error: `action block had no ${missing.join(" and no ")}` };
+  const missing = [!to.length && "recipient", !body && "body"].filter(Boolean);
+  if (missing.length) {
+    return { error: `action block had no ${missing.join(" and no ")}` };
+  }
 
   return {
     kind,
